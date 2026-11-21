@@ -529,7 +529,7 @@ with gr.Blocks(title="AI 对口型视频工作室 (InfiniteTalk)") as demo:
 
 
 if __name__ == "__main__":
-    demo.queue(concurrency_limit=1).launch(
+    demo.queue(default_concurrency_limit=1).launch(
         server_name="0.0.0.0",
         server_port=7860,
         show_error=True,
