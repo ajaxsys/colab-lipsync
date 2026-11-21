@@ -326,10 +326,9 @@ def prepare_audio(job, work):
     limit = float(job.get("max_seconds") or 0)
     if (start > 0 or limit > 0) and dur > 1.0:
         cut = os.path.join(work, "song_cut.wav")
-        args = []
+        args = ["-i", song]
         if start > 0:
             args.extend(["-ss", f"{start:.3f}"])
-        args.extend(["-i", song])
         if limit > 0:
             args.extend(["-t", f"{limit:.3f}"])
         args.extend(["-c:a", "pcm_s16le", cut])

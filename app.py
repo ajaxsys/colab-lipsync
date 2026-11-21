@@ -261,7 +261,7 @@ def clear_materials():
 
 
 def preview_audio_segment(audio_path, start_sec, dur_sec, is_whole_song):
-    """毫秒级截取音频片段供网页试听（纯 ffmpeg 操作，无需显存与 GPU）"""
+    """毫秒级精确截取音频片段供网页试听（纯 ffmpeg 操作，无需显存与 GPU）"""
     target = audio_path
     if not target or not os.path.exists(target):
         # 尝试使用缓存
@@ -276,11 +276,26 @@ def preview_audio_segment(audio_path, start_sec, dur_sec, is_whole_song):
 
     start = max(float(start_sec or 0), 0.0)
     dur = max(float(dur_sec or 10), 1.0)
-    preview_file = os.path.join(WORK_DIR, "preview_clip.wav")
 
+    # 清理旧的试听缓存，防止堆积
+    if os.path.exists(WORK_DIR):
+        for f in os.listdir(WORK_DIR):
+            if f.startswith("preview_clip_") and f.endswith(".wav"):
+                try:
+                    os.remove(os.path.join(WORK_DIR, f))
+                except Exception:
+                    pass
+
+    # 使用唯一毫秒级时间戳，彻底杜绝浏览器对固定 URL 的强缓存问题
+    timestamp = int(time.time() * 1000)
+    preview_file = os.path.join(WORK_DIR, f"preview_clip_{timestamp}.wav")
+
+    # 注意：-ss 必须放在 -i 之后才能对 MP3 进行逐帧精确 seek，避免回到开头
     cmd = [
-        "ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", target,
-        "-t", f"{dur:.3f}", "-c:a", "pcm_s16le", preview_file
+        "ffmpeg", "-y", "-i", target,
+        "-ss", f"{start:.3f}",
+        "-t", f"{dur:.3f}",
+        "-c:a", "pcm_s16le", preview_file
     ]
     try:
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
