@@ -193,34 +193,71 @@ def aspect_sel_val(a):
 
 def handle_image_upload(img_path):
     """当用户上传图片时，自动持久化缓存到工作空间"""
-    if not img_path or not os.path.exists(img_path):
-        return None
+    if not img_path:
+        save_ui_metadata(image=None)
+        return
+    if not os.path.exists(img_path):
+        return
     ext = os.path.splitext(img_path)[1] or ".png"
     target = os.path.join(WORK_DIR, f"cached_input_image{ext}")
-    try:
-        shutil.copy(img_path, target)
-        save_ui_metadata(image=target)
-        return target
-    except Exception:
-        return img_path
+    if os.path.abspath(img_path) != os.path.abspath(target):
+        try:
+            shutil.copy(img_path, target)
+        except Exception:
+            target = img_path
+    save_ui_metadata(image=target)
 
 
 def handle_audio_upload(audio_path):
     """当用户上传音频时，自动分析时长、缓存并更新滑块范围"""
-    if not audio_path or not os.path.exists(audio_path):
-        return None, gr.update(), "尚未上传音频"
+    if not audio_path:
+        save_ui_metadata(audio=None, audio_dur=0)
+        return gr.update(maximum=300), "尚未上传音频"
+    if not os.path.exists(audio_path):
+        return gr.update(), "尚未上传音频"
     ext = os.path.splitext(audio_path)[1] or ".wav"
     target = os.path.join(WORK_DIR, f"cached_input_audio{ext}")
-    try:
-        shutil.copy(audio_path, target)
-    except Exception:
-        target = audio_path
+    if os.path.abspath(audio_path) != os.path.abspath(target):
+        try:
+            shutil.copy(audio_path, target)
+        except Exception:
+            target = audio_path
 
     dur = get_audio_duration(target)
     save_ui_metadata(audio=target, audio_dur=dur)
     max_slider = max(int(dur), 10)
     info_text = f"🎵 音频已就绪，总时长：{format_time(dur)} ({dur:.1f} 秒)"
-    return target, gr.update(maximum=max_slider), info_text
+    return gr.update(maximum=max_slider), info_text
+
+
+def clear_materials():
+    """清空已上传的人物图片与音频，并清除本地持久化缓存文件"""
+    if os.path.exists(WORK_DIR):
+        for f in os.listdir(WORK_DIR):
+            if f.startswith("cached_input_") or f == "preview_clip.wav":
+                try:
+                    os.remove(os.path.join(WORK_DIR, f))
+                except Exception:
+                    pass
+    save_ui_metadata(image=None, audio=None, audio_dur=0)
+    if os.path.exists(JOB_FILE):
+        try:
+            with open(JOB_FILE, "r", encoding="utf-8") as f:
+                job = json.load(f)
+            job.pop("image", None)
+            job.pop("audio", None)
+            with open(JOB_FILE, "w", encoding="utf-8") as f:
+                json.dump(job, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    return (
+        None,  # img_input
+        None,  # audio_input
+        None,  # preview_audio
+        gr.update(maximum=300, value=0.0),  # start_sec_slider
+        "尚未上传音频，请上传歌曲或录音",  # audio_info_display
+        "🟡 素材已清空，您可以重新上传新的人物图片和音频！"  # status_banner
+    )
 
 
 def preview_audio_segment(audio_path, start_sec, dur_sec, is_whole_song):
@@ -430,7 +467,10 @@ with gr.Blocks(title="AI 对口型视频工作室 (InfiniteTalk)") as demo:
 
             # 2. 上传素材
             with gr.Column(elem_classes=["card-box"]):
-                gr.Markdown("### 2. 上传素材 (刷新页面自动保留)")
+                with gr.Row():
+                    gr.Markdown("### 2. 上传素材 (刷新页面自动保留)")
+                    btn_clear_materials = gr.Button("🗑️ 清空素材 (重新上传图片与音频)", variant="secondary", size="sm")
+
                 with gr.Row():
                     img_input = gr.Image(type="filepath", label="人物照片 (正面或微侧脸清晰照片)")
                     audio_input = gr.Audio(type="filepath", label="歌曲或人声音频 (支持 MP3/WAV/FLAC/M4A)")
@@ -471,11 +511,17 @@ with gr.Blocks(title="AI 对口型视频工作室 (InfiniteTalk)") as demo:
                     outputs=[preview_audio]
                 )
 
-                # 音频改变时自动更新时长与滑块上限
+                # 音频改变时自动更新时长与滑块上限（不再递归写回 audio_input）
                 audio_input.change(
                     fn=handle_audio_upload,
                     inputs=[audio_input],
-                    outputs=[audio_input, start_sec_slider, audio_info_display]
+                    outputs=[start_sec_slider, audio_info_display]
+                )
+
+                # 一键清空素材绑定
+                btn_clear_materials.click(
+                    fn=clear_materials,
+                    outputs=[img_input, audio_input, preview_audio, start_sec_slider, audio_info_display, status_banner]
                 )
 
             # 4. 生成参数
