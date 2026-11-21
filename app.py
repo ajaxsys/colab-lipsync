@@ -440,14 +440,15 @@ def generate_video(image_path, audio_path, prompt, neg_prompt, quality, aspect_r
 
 # ---------------- UI 界面定义 ----------------
 custom_css = """
-.container { max-width: 1050px; margin: auto; }
+.container { max-width: 1200px; margin: auto; }
 .card-box { background: #fafafa; border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
 .status-box { background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; padding: 10px 14px; border-radius: 8px; font-size: 0.95em; margin-bottom: 12px; font-weight: 500; }
 .tip-text { font-size: 0.9em; color: #64748b; margin-top: 6px; line-height: 1.5; }
 .audio-tag { color: #2563eb; font-weight: 600; font-size: 0.95em; margin-top: 4px; }
+.wide-audio-box { width: 100% !important; margin-top: 8px; margin-bottom: 8px; }
 """
 
-with gr.Blocks(title="AI 对口型视频工作室 (InfiniteTalk)") as demo:
+with gr.Blocks(title="AI 对口型视频工作室 (InfiniteTalk)", css=custom_css) as demo:
     gr.Markdown("# 🎙️ InfiniteTalk 视频对口型工作室")
     status_banner = gr.Markdown("🟢 服务就绪，已开启会话自愈与素材自动回显保护", elem_classes=["status-box"])
 
@@ -483,22 +484,20 @@ with gr.Blocks(title="AI 对口型视频工作室 (InfiniteTalk)") as demo:
             # 2. 上传素材
             with gr.Column(elem_classes=["card-box"]):
                 with gr.Row():
-                    gr.Markdown("### 2. 上传素材 (刷新页面自动保留)")
-                    btn_clear_materials = gr.Button("🗑️ 清空素材 (重新上传图片与音频)", variant="secondary", size="sm")
+                    gr.Markdown("### 2. 人物照片")
+                    btn_clear_materials = gr.Button("🗑️ 清空所有素材 (重新上传图片与音频)", variant="secondary", size="sm")
 
-                with gr.Row():
-                    img_input = gr.Image(type="filepath", label="人物照片 (正面或微侧脸清晰照片)")
-                    audio_input = gr.Audio(type="filepath", label="歌曲或人声音频 (支持 MP3/WAV/FLAC/M4A)")
-
-                audio_info_display = gr.Markdown("尚未上传音频", elem_classes=["audio-tag"])
-
-                # 素材上传即刻自动缓存
+                img_input = gr.Image(type="filepath", label="人物照片 (正面或微侧脸清晰照片)", height=260)
                 img_input.change(fn=handle_image_upload, inputs=[img_input], outputs=[])
 
-            # 3. 音频区间截取与试听
+            # 3. 音频波形工作室与区间截取
             with gr.Column(elem_classes=["card-box"]):
-                gr.Markdown("### 3. 音频选段与精准试听")
-                gr.Markdown("<div class='tip-text'>💡 拖动滑块定位到<b>有人声唱歌的片段</b>（避开漫长的前奏纯伴奏），点击【试听】即点即播，确认有歌词后再生成！</div>")
+                gr.Markdown("### 3. 音频波形工作室与精准选段 (宽屏大波形)")
+                gr.Markdown("<div class='tip-text'>💡 宽屏波形视图：您既可以直接在下方波形上<b>鼠标拖选橙色区域点 Trim 裁剪</b>，也可以使用下方的<b>毫秒级精准滑块</b>定位开唱片段！</div>")
+
+                # 全宽大波形组件
+                audio_input = gr.Audio(type="filepath", label="🎵 歌曲或人声音频 (全宽波形，支持拖拽高亮/试听/Trim 剪裁)", elem_classes=["wide-audio-box"])
+                audio_info_display = gr.Markdown("尚未上传音频", elem_classes=["audio-tag"])
 
                 with gr.Row():
                     start_sec_slider = gr.Slider(minimum=0.0, maximum=300.0, value=0.0, step=0.5, label="🎵 截取起始时间 (秒)")
@@ -516,7 +515,7 @@ with gr.Blocks(title="AI 对口型视频工作室 (InfiniteTalk)") as demo:
                 )
 
                 with gr.Row():
-                    preview_btn = gr.Button("🎧 试听当前截取片段 (毫秒响应，不耗 GPU)", variant="secondary")
+                    preview_btn = gr.Button("🎧 试听选定片段 (精确 Seek，毫秒响应)", variant="secondary")
                 preview_audio = gr.Audio(label="选定片段试听播放器", interactive=False)
 
                 # 试听交互绑定
