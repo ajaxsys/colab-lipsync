@@ -322,11 +322,21 @@ def prepare_audio(job, work):
     dur = info.frames / float(info.samplerate)
     if dur < 1.0:
         raise UserError("音频太短（不到 1 秒）")
+    start = float(job.get("start_seconds") or 0)
     limit = float(job.get("max_seconds") or 0)
-    if limit and dur > limit + 0.01:
+    if (start > 0 or limit > 0) and dur > 1.0:
         cut = os.path.join(work, "song_cut.wav")
-        run_ffmpeg(["-i", song, "-t", f"{limit:.3f}", "-c:a", "pcm_s16le", cut], "截取音频")
-        song, dur = cut, limit
+        args = []
+        if start > 0:
+            args.extend(["-ss", f"{start:.3f}"])
+        args.extend(["-i", song])
+        if limit > 0:
+            args.extend(["-t", f"{limit:.3f}"])
+        args.extend(["-c:a", "pcm_s16le", cut])
+        run_ffmpeg(args, "截取音频")
+        song = cut
+        info = sf.info(song)
+        dur = info.frames / float(info.samplerate)
     if job.get("vocals", "auto") != "auto":
         return song, song, dur
     vocals = os.path.join(work, "vocals.wav")
