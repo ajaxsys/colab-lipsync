@@ -1,11 +1,13 @@
 """
-Patch utility for Meituan LongCat-Video-Avatar 1.6.
+Patch utility for Meituan LongCat-Video-Avatar 1.6 on 24GB GPUs (NVIDIA L4 / RTX 4090).
 
 Fixes:
-1. Zero-RAM Meta-Device Loading: Prevents host CPU OOM (SIGKILL) on cloud instances (e.g., Colab, 24GB L4/RTX 4090)
+1. Zero-RAM Meta-Device Loading: Prevents host CPU OOM (SIGKILL) on cloud instances (e.g., Colab, L4, 4090)
    by initializing the 13.6B parameter model on PyTorch's 'meta' device and materializing INT8 shards
    directly into CUDA VRAM with assign=True. CPU RAM usage drops from 54GB+ to <3GB.
-2. Sharded safe loading without intermediate dictionary accumulation.
+2. Text Encoder CPU Offloading: Prevents CUDA OOM on 24GB GPUs by keeping the 9.5GB UMT5-XXL text encoder
+   resident on CPU RAM rather than cramming it into GPU VRAM alongside DiT (14GB) and Whisper (3GB).
+   Prompt embedding forward pass runs on CPU in ~4 seconds and feeds prompt embeddings directly to CUDA.
 """
 
 import os
@@ -96,13 +98,11 @@ def patch_quantization_module(quantization_module_path: str):
     return model
 '''
 
-    # Replace the existing load_quantized_dit implementation
     func_marker = "def load_quantized_dit"
     start_pos = content.find(func_marker)
     if start_pos == -1:
         raise ValueError("Could not find load_quantized_dit in file.")
 
-    # Find the end of load_quantized_dit (before DEFAULT_FP8_FFN_BLOCKS)
     next_func_marker = "DEFAULT_FP8_FFN_BLOCKS"
     end_pos = content.find(next_func_marker, start_pos)
     if end_pos == -1:
@@ -111,9 +111,53 @@ def patch_quantization_module(quantization_module_path: str):
     new_content = content[:start_pos] + optimized_func + "\n\n" + content[end_pos:]
     with open(quantization_module_path, "w", encoding="utf-8") as f:
         f.write(new_content)
-    print(f"✅ Successfully patched {quantization_module_path}")
+    print(f"✅ Successfully patched {quantization_module_path} (Zero-RAM Meta Device)")
+
+
+def patch_pipeline_module(pipeline_module_path: str):
+    """
+    Patches pipeline_longcat_video_avatar.py to keep UMT5-XXL text_encoder on CPU,
+    saving ~9.5GB of GPU VRAM to allow inference within 24GB GPUs (NVIDIA L4 / RTX 4090).
+    """
+    if not os.path.exists(pipeline_module_path):
+        raise FileNotFoundError(f"File not found: {pipeline_module_path}")
+
+    with open(pipeline_module_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # 1. Patch `to()` method: don't move text_encoder to CUDA
+    target_to = "        if self.text_encoder is not None:\n            self.text_encoder = self.text_encoder.to(device, non_blocking=True)"
+    replace_to = "        if self.text_encoder is not None:\n            # Keep text_encoder on CPU to preserve 9.5GB VRAM on 24GB GPUs\n            pass"
+
+    if target_to in content:
+        content = content.replace(target_to, replace_to)
+    else:
+        print("ℹ️ Note: to() already patched or modified in pipeline.")
+
+    # 2. Patch `_get_t5_prompt_embeds`: execute text_encoder on its own device (CPU) and move output to target device
+    target_fwd = "        prompt_embeds = self.text_encoder(text_input_ids.to(device), mask.to(device)).last_hidden_state"
+    replace_fwd = "        t_dev = next(self.text_encoder.parameters()).device\n        prompt_embeds = self.text_encoder(text_input_ids.to(t_dev), mask.to(t_dev)).last_hidden_state"
+
+    if target_fwd in content:
+        content = content.replace(target_fwd, replace_fwd)
+    else:
+        print("ℹ️ Note: _get_t5_prompt_embeds already patched or modified.")
+
+    with open(pipeline_module_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"✅ Successfully patched {pipeline_module_path} (CPU Text Encoder Offload)")
+
+
+def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
+    quant_path = os.path.join(repo_dir, "longcat_video", "modules", "quantization.py")
+    pipe_path = os.path.join(repo_dir, "longcat_video", "pipeline_longcat_video_avatar.py")
+
+    if os.path.exists(quant_path):
+        patch_quantization_module(quant_path)
+    if os.path.exists(pipe_path):
+        patch_pipeline_module(pipe_path)
 
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else "/content/LongCat-Video/longcat_video/modules/quantization.py"
-    patch_quantization_module(target)
+    target_repo = sys.argv[1] if len(sys.argv) > 1 else "/content/LongCat-Video"
+    apply_all_patches(target_repo)

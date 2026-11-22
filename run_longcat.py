@@ -3,8 +3,9 @@ Autonomous Runner for LongCat-Video-Avatar 1.6 on 24GB GPUs (NVIDIA L4 / RTX 409
 
 Pipeline features:
 1. Auto-applies zero-RAM meta-device patch to avoid CPU memory OOM (SIGKILL).
-2. Uses INT8 quantized base model and mixed LoRA distillation (8-step inference).
-3. Connects Whisper-Large-v3 and Kim_Vocal_2 for noise-immune lip synchronization.
+2. Auto-applies text-encoder CPU offload patch to fit within 24GB VRAM without OOM.
+3. Uses INT8 quantized base model and mixed LoRA distillation (8-step inference).
+4. Connects Whisper-Large-v3 and Kim_Vocal_2 for noise-immune lip synchronization.
 """
 
 import os
@@ -15,15 +16,18 @@ import subprocess
 from pathlib import Path
 
 
-def run_cmd(cmd, cwd=None):
+def run_cmd(cmd, cwd=None, env=None):
     print(f"🚀 Running: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
-    res = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str))
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
+    res = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), env=run_env)
     if res.returncode != 0:
         raise RuntimeError(f"Command failed with return code {res.returncode}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run LongCat-Video-Avatar 1.6 with zero-RAM patch")
+    parser = argparse.ArgumentParser(description="Run LongCat-Video-Avatar 1.6 with zero-RAM and CPU-offload patches")
     parser.add_argument("--image", required=True, help="Input portrait image path")
     parser.add_argument("--audio", required=True, help="Input audio singing file path")
     parser.add_argument("--output_dir", default="./output_longcat", help="Output directory")
@@ -47,16 +51,18 @@ def main():
         json.dump(job_data, f, indent=2)
     print(f"✅ Generated job config: {job_json_path}")
 
-    # 2. Apply memory patch
-    patch_script = Path(__file__).parent / "patches" / "patch_longcat.py"
-    target_py = f"{repo_dir}/longcat_video/modules/quantization.py"
-    if os.path.exists(target_py):
-        from patches.patch_longcat import patch_quantization_module
-        patch_quantization_module(target_py)
-    else:
-        print(f"⚠️ {target_py} not found, skipping local patch.")
+    # 2. Apply memory and VRAM patches
+    patch_module_path = Path(__file__).parent / "patches" / "patch_longcat.py"
+    if patch_module_path.exists():
+        sys.path.insert(0, str(Path(__file__).parent))
+        from patches.patch_longcat import apply_all_patches
+        apply_all_patches(repo_dir)
 
-    # 3. Launch torchrun
+    # 3. Launch torchrun with PyTorch memory fragmentation configuration
+    env_vars = {
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+    }
+
     cmd = [
         "torchrun", "--nproc_per_node=1", "run_demo_avatar_single_audio_to_video.py",
         f"--checkpoint_dir={weights_dir}",
@@ -69,7 +75,7 @@ def main():
         f"--resolution={args.resolution}",
         f"--num_segments={args.num_segments}"
     ]
-    run_cmd(cmd, cwd=repo_dir)
+    run_cmd(cmd, cwd=repo_dir, env=env_vars)
 
 
 if __name__ == "__main__":
