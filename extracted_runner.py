@@ -358,13 +358,70 @@ def separate_vocals(job, song, out):
     import numpy as np
     import soundfile as sf
     import torch
+    import shutil
 
-    stage("separate", "分离人声（去掉伴奏，口型更准）…", 0)
+    engine = str(job.get("separator", "bs_roformer")).lower()
+    work = os.path.dirname(out)
+
+    # 1. 优先尝试使用 BS-RoFormer (2025 SOTA) 进行超清人声分离
+    if engine in ("bs_roformer", "roformer", "auto"):
+        stage("separate", "使用 BS-RoFormer 进行 SOTA 超清人声分离…", 10)
+        try:
+            from audio_separator.separator import Separator
+
+            sep_dir = os.path.join(work, "sep_bs_roformer")
+            os.makedirs(sep_dir, exist_ok=True)
+
+            model_fn = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
+            custom_model = job.get("models", {}).get("bs_roformer")
+            model_dir = None
+            if custom_model and os.path.isfile(custom_model):
+                model_dir = os.path.dirname(custom_model)
+                model_fn = os.path.basename(custom_model)
+
+            perf(f"初始化 BS-RoFormer 引擎: {model_fn}")
+            separator = Separator(
+                model_file_dir=model_dir,
+                output_dir=sep_dir,
+                output_format="WAV",
+                log_level=30  # WARNING
+            )
+            separator.load_model(model_filename=model_fn)
+            sep_outputs = separator.separate(song)
+
+            vocal_file = None
+            for f in sep_outputs:
+                full_p = os.path.join(sep_dir, f) if not os.path.isabs(f) else f
+                if "vocal" in f.lower():
+                    vocal_file = full_p
+                    break
+
+            if vocal_file and os.path.exists(vocal_file):
+                shutil.copy2(vocal_file, out)
+                del separator
+                gc_cuda()
+                stage("separate", "BS-RoFormer 超清人声分离完成！", 100)
+                perf(f"BS-RoFormer 分离成功：{out}")
+                return
+            else:
+                perf("BS-RoFormer 未能匹配到 vocals 输出文件，准备降级回退")
+        except Exception as e:
+            perf(f"BS-RoFormer 处理未命中或环境缺少依赖 ({e})，自动回退到 HTDemucs")
+
+    # 2. HTDemucs 经典分离方案 (作为回退或用户指定)
+    stage("separate", "使用 HTDemucs 分离人声（去掉伴奏，口型更准）…", 20)
     demucs_stubs()
     from demucs.apply import apply_model
     from demucs.states import load_model
 
-    pkg = torch.load(job["models"]["demucs"], map_location="cpu", weights_only=False)
+    demucs_model_path = job.get("models", {}).get("demucs")
+    if not demucs_model_path or not os.path.exists(demucs_model_path):
+        perf(f"未找到 Demucs 模型 ({demucs_model_path})，直接使用原音频")
+        shutil.copy2(song, out)
+        stage("separate", "使用原音频作为人声", 100)
+        return
+
+    pkg = torch.load(demucs_model_path, map_location="cpu", weights_only=False)
     model = load_model(pkg)
     model.eval()
     data, sr = sf.read(song, dtype="float32", always_2d=True)
@@ -382,7 +439,7 @@ def separate_vocals(job, song, out):
     sf.write(out, vocals.T.numpy().astype(np.float32), model.samplerate)
     del model, src
     gc_cuda()
-    stage("separate", "人声分离完成", 100)
+    stage("separate", "HTDemucs 人声分离完成", 100)
 
 
 def audio_embedding(job, vocals, dev):
@@ -1504,8 +1561,44 @@ def main():
     stage("mux", "合成声音…", 100)
     out = job["out"]
     os.makedirs(os.path.dirname(out), exist_ok=True)
+
+    do_enhance = bool(job.get("enhance_face", False))
+    do_interpolate = int(job.get("interpolate_fps", 0) or 0) > 0
+
+    base_muxed = out if not (do_enhance or do_interpolate) else os.path.join(work, "muxed_base.mp4")
     run_ffmpeg(["-i", tmp_video, "-i", song, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k",
-                "-shortest", "-movflags", "+faststart", out], "合成声音")
+                "-shortest", "-movflags", "+faststart", "-y", base_muxed], "合成声音")
+
+    current_video = base_muxed
+
+    # ---- 3. CodeFormer 面部超分增强 (可选)
+    if do_enhance:
+        stage("enhance", "正在执行 CodeFormer 面部高清增强（消除模糊/水彩感）…", 0)
+        try:
+            from enhance_face import enhance_video_faces
+            enhanced_video = os.path.join(work, "enhanced_face.mp4") if do_interpolate else out
+            fidelity = float(job.get("enhance_fidelity", 0.7))
+            enhance_video_faces(current_video, enhanced_video, fidelity=fidelity)
+            current_video = enhanced_video
+            stage("enhance", "CodeFormer 面部高清增强完成！", 100)
+        except Exception as e:
+            perf(f"CodeFormer 增强跳过或执行失败：{e}")
+
+    # ---- 4. RIFE / 60fps 补帧 (可选)
+    if do_interpolate:
+        target_fps = int(job.get("interpolate_fps", 60))
+        stage("interpolate", f"正在执行 {target_fps}fps 超丝滑补帧…", 0)
+        try:
+            from interpolate_video import interpolate_video
+            interpolate_video(current_video, out, target_fps=target_fps)
+            current_video = out
+            stage("interpolate", f"{target_fps}fps 补帧完成！", 100)
+        except Exception as e:
+            perf(f"补帧跳过或执行失败：{e}")
+
+    if current_video != out and os.path.exists(current_video):
+        shutil.copy2(current_video, out)
+
     emit(done=out, secs=round(time.time() - t0, 1), width=W, height=H, frames=written, seed=seed)
 
 

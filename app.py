@@ -102,7 +102,9 @@ def load_server_state():
     whole_song_val = False
     accel_val = True
     sage_val = True
-    demucs_val = True
+    sep_val = "BS-RoFormer (2025 SOTA 极净人声)"
+    enhance_val = False
+    interp_val = False
     video_val = None
     audio_info_msg = "尚未上传音频"
     status_msg = "🟢 服务就绪，可随时提交新任务"
@@ -146,7 +148,9 @@ def load_server_state():
     whole_song_val = meta.get("whole_song", whole_song_val)
     accel_val = job.get("accel", accel_val)
     sage_val = job.get("sage", sage_val)
-    demucs_val = ("vocals" not in job)
+    sep_val = meta.get("separator") or ("HTDemucs (经典兼容)" if ("use_demucs" in meta and not meta.get("use_demucs")) else "BS-RoFormer (2025 SOTA 极净人声)")
+    enhance_val = bool(meta.get("enhance_face", job.get("enhance_face", False)))
+    interp_val = bool(meta.get("interpolate_fps", (job.get("interpolate_fps", 0) or 0) > 0))
 
     # 恢复历史/最新视频
     hist = get_history_videos()
@@ -175,7 +179,7 @@ def load_server_state():
         img_val, audio_val, prompt_val, neg_val, quality_sel_val(quality_val), aspect_sel_val(aspect_val),
         steps_val, seed_val, gr.update(value=start_sec_val, maximum=slider_max),
         gr.update(value=dur_sec_val, interactive=not whole_song_val),
-        whole_song_val, accel_val, sage_val, demucs_val,
+        whole_song_val, accel_val, sage_val, sep_val, enhance_val, interp_val,
         video_val, btn_update, status_msg, audio_info_msg
     )
 
@@ -304,7 +308,7 @@ def preview_audio_segment(audio_path, start_sec, dur_sec, is_whole_song):
         raise gr.Error(f"试听截取失败：{str(e)}")
 
 
-def build_job_config(image_path, audio_path, prompt, neg_prompt, quality, aspect_ratio, steps, seed, start_sec, dur_sec, is_whole_song, accel, sage, use_demucs):
+def build_job_config(image_path, audio_path, prompt, neg_prompt, quality, aspect_ratio, steps, seed, start_sec, dur_sec, is_whole_song, accel, sage, separator_choice, enhance_face=False, interpolate_fps=False):
     """构建任务 JSON 配置"""
     is_hd = (quality == "720P (清晰，慢 2-3 倍)")
     if aspect_ratio == "9:16 竖屏":
@@ -326,6 +330,16 @@ def build_job_config(image_path, audio_path, prompt, neg_prompt, quality, aspect
 
     out_file = os.path.join(WORK_DIR, f"output_{int(time.time())}.mp4")
 
+    # 分离引擎判断
+    if "BS-RoFormer" in str(separator_choice):
+        sep_engine = "bs_roformer"
+    elif "Demucs" in str(separator_choice):
+        sep_engine = "demucs"
+    elif not separator_choice or "直通" in str(separator_choice) or separator_choice is False:
+        sep_engine = "none"
+    else:
+        sep_engine = "bs_roformer"
+
     job = {
         "work_dir": WORK_DIR,
         "code_dir": CODE_DIR,
@@ -343,6 +357,10 @@ def build_job_config(image_path, audio_path, prompt, neg_prompt, quality, aspect
         "accel": bool(accel),
         "sage": bool(sage),
         "color_fix": 1.0,
+        "separator": sep_engine,
+        "enhance_face": bool(enhance_face),
+        "enhance_fidelity": 0.7,
+        "interpolate_fps": 60 if interpolate_fps else 0,
         "checkpoint_dir": os.path.join("/content/drive/MyDrive/InfiniteTalk_Checkpoints", f"job_{w}x{h}") if os.path.exists("/content/drive/MyDrive") else os.path.join(WORK_DIR, "checkpoints"),
         "models": {
             "base": os.path.join(MODELS_DIR, "base"),
@@ -351,15 +369,17 @@ def build_job_config(image_path, audio_path, prompt, neg_prompt, quality, aspect
             "lora": os.path.join(MODELS_DIR, "lora", "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"),
             "wav2vec": os.path.join(MODELS_DIR, "wav2vec"),
             "t5_dir": os.path.join(MODELS_DIR, "t5"),
-            "demucs": os.path.join(MODELS_DIR, "demucs", "htdemucs.pth")
+            "demucs": os.path.join(MODELS_DIR, "demucs", "htdemucs.pth"),
+            "bs_roformer": os.path.join(MODELS_DIR, "bs_roformer", "model_bs_roformer_ep_317_sdr_12.9755.ckpt"),
+            "codeformer": os.path.join(MODELS_DIR, "codeformer", "codeformer.pth"),
         }
     }
-    if not use_demucs:
+    if sep_engine == "none":
         job["vocals"] = audio_path
     return job
 
 
-def generate_video(image_path, audio_path, prompt, neg_prompt, quality, aspect_ratio, steps, seed, start_sec, dur_sec, is_whole_song, accel, sage, use_demucs, progress=gr.Progress()):
+def generate_video(image_path, audio_path, prompt, neg_prompt, quality, aspect_ratio, steps, seed, start_sec, dur_sec, is_whole_song, accel, sage, separator_choice, enhance_face, interpolate_fps, progress=gr.Progress()):
     global CURRENT_PROC
 
     if not image_path or not os.path.exists(image_path):
@@ -379,10 +399,11 @@ def generate_video(image_path, audio_path, prompt, neg_prompt, quality, aspect_r
         save_ui_metadata(
             image=image_path, audio=audio_path, prompt=prompt, negative=neg_prompt,
             quality=quality, aspect=aspect_ratio, steps=steps, seed=seed,
-            start_sec=start_sec, dur_sec=dur_sec, whole_song=is_whole_song
+            start_sec=start_sec, dur_sec=dur_sec, whole_song=is_whole_song,
+            separator=separator_choice, enhance_face=enhance_face, interpolate_fps=interpolate_fps
         )
 
-        job = build_job_config(image_path, audio_path, prompt, neg_prompt, quality, aspect_ratio, steps, seed, start_sec, dur_sec, is_whole_song, accel, sage, use_demucs)
+        job = build_job_config(image_path, audio_path, prompt, neg_prompt, quality, aspect_ratio, steps, seed, start_sec, dur_sec, is_whole_song, accel, sage, separator_choice, enhance_face, interpolate_fps)
         with open(JOB_FILE, "w", encoding="utf-8") as f:
             json.dump(job, f, ensure_ascii=False, indent=2)
 
@@ -553,7 +574,17 @@ with gr.Blocks(title="AI 对口型视频工作室 (InfiniteTalk)", css=custom_cs
                 with gr.Row():
                     accel_chk = gr.Checkbox(label="4 步加速 (lightx2v 蒸馏加速，推荐开启)", value=True)
                     sage_chk = gr.Checkbox(label="sage-attn 注意力加速", value=True)
-                    demucs_chk = gr.Checkbox(label="自动分离伴奏与人声 (Demucs)", value=True)
+
+                with gr.Row():
+                    sep_sel = gr.Radio(
+                        choices=["BS-RoFormer (2025 SOTA 极净人声)", "HTDemucs (经典兼容)", "原音频直通 (纯人声输入)"],
+                        value="BS-RoFormer (2025 SOTA 极净人声)",
+                        label="人声伴奏分离引擎"
+                    )
+
+                with gr.Row():
+                    enhance_chk = gr.Checkbox(label="CodeFormer 面部高清超分 (消除水彩模糊/五官质感提升)", value=False)
+                    interp_chk = gr.Checkbox(label="RIFE 60fps 超丝滑补帧 (消除 25fps 微卡顿)", value=False)
 
             gen_btn = gr.Button("🚀 开始生成视频", variant="primary", size="lg")
 
@@ -573,7 +604,8 @@ with gr.Blocks(title="AI 对口型视频工作室 (InfiniteTalk)", css=custom_cs
         fn=generate_video,
         inputs=[
             img_input, audio_input, prompt_input, neg_input, quality_sel, aspect_sel,
-            steps_input, seed_input, start_sec_slider, dur_sec_slider, whole_song_chk, accel_chk, sage_chk, demucs_chk
+            steps_input, seed_input, start_sec_slider, dur_sec_slider, whole_song_chk, accel_chk, sage_chk,
+            sep_sel, enhance_chk, interp_chk
         ],
         outputs=[video_output, gen_btn, status_banner]
     )
@@ -583,7 +615,8 @@ with gr.Blocks(title="AI 对口型视频工作室 (InfiniteTalk)", css=custom_cs
         fn=load_server_state,
         outputs=[
             img_input, audio_input, prompt_input, neg_input, quality_sel, aspect_sel,
-            steps_input, seed_input, start_sec_slider, dur_sec_slider, whole_song_chk, accel_chk, sage_chk, demucs_chk,
+            steps_input, seed_input, start_sec_slider, dur_sec_slider, whole_song_chk, accel_chk, sage_chk,
+            sep_sel, enhance_chk, interp_chk,
             video_output, gen_btn, status_banner, audio_info_display
         ]
     )

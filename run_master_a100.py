@@ -55,7 +55,9 @@ def main():
         "lora": "/content/models/lora/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors",
         "wav2vec": "/content/models/wav2vec",
         "t5_dir": "/content/models/t5",
-        "demucs": "/content/models/demucs/htdemucs.pth"
+        "demucs": "/content/models/demucs/htdemucs.pth",
+        "bs_roformer": "/content/models/bs_roformer/model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+        "codeformer": "/content/models/codeformer/codeformer.pth"
     }
 
     # ========================================================
@@ -82,6 +84,10 @@ def main():
         "accel": True,
         "sage": True,
         "color_fix": 1.0,
+        "separator": "bs_roformer",
+        "enhance_face": False,
+        "interpolate_fps": 0,
+        "checkpoint_dir": "/content/drive/MyDrive/InfiniteTalk_Checkpoints/job_480x848" if os.path.exists("/content/drive/MyDrive") else "/content/workspace_portrait/checkpoints",
         "models": models_dict
     }
 
@@ -126,6 +132,10 @@ def main():
         "accel": True,
         "sage": True,
         "color_fix": 1.0,
+        "separator": "bs_roformer",
+        "enhance_face": False,
+        "interpolate_fps": 0,
+        "checkpoint_dir": "/content/drive/MyDrive/InfiniteTalk_Checkpoints/job_848x480" if os.path.exists("/content/drive/MyDrive") else "/content/workspace_landscape/checkpoints",
         "models": models_dict
     }
 

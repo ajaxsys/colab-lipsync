@@ -13,18 +13,46 @@ os.makedirs(f"{MODELS_DIR}/lora", exist_ok=True)
 os.makedirs(f"{MODELS_DIR}/wav2vec", exist_ok=True)
 os.makedirs(f"{MODELS_DIR}/t5", exist_ok=True)
 os.makedirs(f"{MODELS_DIR}/demucs", exist_ok=True)
+os.makedirs(f"{MODELS_DIR}/bs_roformer", exist_ok=True)
+os.makedirs(f"{MODELS_DIR}/codeformer", exist_ok=True)
 
-print("🚀 开始高速下载 InfiniteTalk / Wan2.1 模型权重...")
+print("🚀 开始高速下载 InfiniteTalk / Wan2.1 及升级模型权重...")
 
-# 1. Demucs 模型
+# 1. 人声分离模型 (SOTA BS-RoFormer + 兼容 HTDemucs)
+bs_roformer_path = f"{MODELS_DIR}/bs_roformer/model_bs_roformer_ep_317_sdr_12.9755.ckpt"
+if not os.path.exists(bs_roformer_path):
+    print("📥 [1a/6] 下载 BS-RoFormer 2025 SOTA 人声分离权重...")
+    try:
+        hf_hub_download(repo_id="KimberleyJensen/BS-RoFormer", filename="model_bs_roformer_ep_317_sdr_12.9755.ckpt", local_dir=f"{MODELS_DIR}/bs_roformer")
+        print("✅ BS-RoFormer 权重准备就绪")
+    except Exception as e:
+        print(f"⚠️ BS-RoFormer 预下载跳过 ({e})，运行时将通过 audio-separator 动态载入")
+else:
+    print("⚡ BS-RoFormer 权重已存在")
+
 demucs_path = f"{MODELS_DIR}/demucs/htdemucs.pth"
 if not os.path.exists(demucs_path):
-    print("📥 [1/5] 下载 Demucs 人声分离权重...")
+    print("📥 [1b/6] 下载 Demucs 经典人声分离权重 (兼容备用)...")
     demucs_url = "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th"
-    urllib.request.urlretrieve(demucs_url, demucs_path)
-    print("✅ Demucs 权重下载完成")
+    try:
+        urllib.request.urlretrieve(demucs_url, demucs_path)
+        print("✅ Demucs 权重下载完成")
+    except Exception as e:
+        print(f"⚠️ Demucs 下载失败: {e}")
 else:
     print("⚡ Demucs 权重已存在")
+
+# 1.2 CodeFormer 面部增强模型
+cf_path = f"{MODELS_DIR}/codeformer/codeformer.pth"
+if not os.path.exists(cf_path):
+    print("📥 [1c/6] 下载 CodeFormer 面部超分修复权重...")
+    try:
+        hf_hub_download(repo_id="sczhou/CodeFormer", filename="codeformer.pth", local_dir=f"{MODELS_DIR}/codeformer")
+        print("✅ CodeFormer 权重准备就绪")
+    except Exception as e:
+        print(f"⚠️ CodeFormer 预下载跳过: {e}")
+else:
+    print("⚡ CodeFormer 权重已存在")
 
 # 2. Chinese Wav2Vec2 权重
 print("📥 [2/5] 下载 Chinese Wav2Vec2 音频特征提取权重...")

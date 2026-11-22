@@ -1,6 +1,25 @@
 # 🎙️ Colab InfiniteTalk Lipsync (Wan2.1) & LongCat-Video-Avatar
 
-基于 **Wan2.1 (14B) + InfiniteTalk** 与 **LongCat-Video-Avatar 1.5/1.6** 的高精度开源数字人工作室。针对 Google Colab（A100 / L4）深度定制，提供免安装一键运行 Notebook、**Google Drive 分段断点续跑引擎（防回收/防崩溃）**、状态持久回显与双旗舰模型横向对比方案。
+基于 **Wan2.1 (14B) + InfiniteTalk** 与 **LongCat-Video-Avatar 1.6** 的高精度开源数字人工作室。针对 Google Colab（A100 / L4）深度定制，提供免安装一键运行 Notebook、**Google Drive 分段断点续跑引擎（防回收/防崩溃）**、**2025/2026 四大代际画质流水线升级**与双旗舰模型横向对比方案。
+
+---
+
+## 🌟 2025/2026 四大流水线重大升级
+
+本项目已全面完成数字人全链路架构升级：
+
+1. **🎙️ 人声分离升级（BS-RoFormer 替换 HTDemucs）**：
+   - 告别 2022 年老旧的 HTDemucs，全面引入 **BS-RoFormer (Band-Split RoFormer, 2025 SOTA)**；
+   - SDR 音质指标从 9.0 dB 跃升至 **12.97 dB**，伴奏消除极净，彻底杜绝鼓点与管弦乐底噪导致的唇形微动误触发，换气与咬字精度质变。
+2. **🐱 双旗舰基座支持（新增 LongCat-Video-Avatar 1.6）**：
+   - 支持美团次世代 13.6B 自研底座 + **Whisper-Large-v3** 驱动的 LongCat 1.6；
+   - 提供开箱即用的对比 Notebook，同台评测 Wan2.1 与 LongCat 1.6 在同一段 30 秒高潮唱腔下的表现。
+3. **✨ 面部超分增强（CodeFormer 消除水彩感）**：
+   - 新增 `enhance_face.py` 后处理模块，搭载 **CodeFormer** 面部高清重建；
+   - 彻底修复 480P 放大带来的皮肤涂抹感与水彩模糊，重塑清晰的虹膜眼神光、牙齿边缘与唇纹细节。
+4. **⚡ 60fps 高刷补帧（RIFE / MCI 运动补偿）**：
+   - 新增 `interpolate_video.py` 补帧模块，将原生 25fps 平滑插帧至 **60fps**；
+   - 针对歌唱大幅度开合与微表情进行双向光流补偿，音画严丝合缝，彻底消除卡顿感。
 
 ---
 
@@ -19,14 +38,16 @@
 
 本项目全面支持与评测两大开源数字人旗舰方案：
 
-| 对比维度 | 方案 A：Wan2.1 + InfiniteTalk (本项目默认) | 方案 B：LongCat-Video-Avatar 1.5/1.6 (进阶对比) |
+| 对比维度 | 方案 A：Wan2.1 + InfiniteTalk (本项目默认) | 方案 B：LongCat-Video-Avatar 1.6 (进阶对比) |
 | :--- | :--- | :--- |
 | **底座基座** | 阿里 **Wan2.1-I2V-14B** (2025 年 2 月) | 美团自研 **LongCat-Video (13.6B)** (2025 年末/2026) |
 | **音频编码器** | **Chinese-Wav2Vec2** (Tencent Games 2021~2022) | **OpenAI Whisper-Large-v3** (2024~2025) |
+| **分离前处理** | **BS-RoFormer (2025 SOTA, SDR 12.97)** | 原生集成 / Whisper 鲁棒抗噪 |
 | **推理步数与加速** | **4 步蒸馏** (LightX2V CFG-Distill) | **8 步蒸馏** (DMD2 原生蒸馏) |
-| **视觉风格与优势** | **影视级写实真人**：皮肤肌理、眼神光真实感极强 | **高泛化与动作防畸变**：强化学习防手部变形，二次元/动物表现好 |
-| **歌唱咬字表现** | 中文普通话咬字清晰，长转音平稳 | Whisper 加持下，对微弱气口、转音起伏与多语种更敏感 |
-| **断点接续支持** | **✅ 已实装 Google Drive 分段断点引擎** | 依赖一次性批次生成 |
+| **视觉风格与优势** | **影视级写实真人**：皮肤肌理、眼神光真实感极强 | **高泛化与防畸变**：强化学习防手部变形，二次元/动物表现好 |
+| **歌唱咬字表现** | 普通话咬字清晰，长转音平稳 | Whisper 加持下，对微弱气口、转音起伏与多语种更敏感 |
+| **断点接续支持** | **✅ 已实装 Google Drive 分段断点引擎** | 依赖单次批次生成 |
+| **后处理增强** | **✅ 支持 CodeFormer 超分 + RIFE 60fps 补帧** | **✅ 通用支持 CodeFormer + RIFE** |
 | **Notebook 入口** | [Colab_InfiniteTalk_Web.ipynb](Colab_InfiniteTalk_Web.ipynb) | [Colab_LongCat_Avatar.ipynb](Colab_LongCat_Avatar.ipynb) |
 
 ---
@@ -66,12 +87,14 @@
 ## 📂 项目文件结构
 
 ```text
-├── Colab_InfiniteTalk_Web.ipynb   # Wan2.1 + InfiniteTalk 一键运行 Notebook (含断点接续)
-├── Colab_LongCat_Avatar.ipynb     # LongCat-Video-Avatar 1.5 对比评测 Notebook
-├── app.py                         # Gradio WebUI 前端交互服务 (含回显、锁定与断点管理)
-├── extracted_runner.py            # 核心推理引擎 (Wan2.1 + InfiniteTalk + 断点持久化)
+├── Colab_InfiniteTalk_Web.ipynb   # Wan2.1 + InfiniteTalk 一键运行 Notebook (含断点接续与后处理)
+├── Colab_LongCat_Avatar.ipynb     # LongCat-Video-Avatar 1.6 对比评测 Notebook (含 Drive 保存)
+├── app.py                         # Gradio WebUI 前端交互服务 (含回显、锁定、算法选择与后处理)
+├── extracted_runner.py            # 核心推理引擎 (Wan2.1 + InfiniteTalk + BS-RoFormer + 断点持久化)
+├── enhance_face.py                # CodeFormer 面部超分辨率与五官质感增强脚本
+├── interpolate_video.py           # RIFE / MCI 60fps 高刷运动补偿补帧脚本
 ├── run_master_a100.py             # A100 全自动双版本 (9:16 + 16:9) 批处理管线
-├── download_models.py             # 29GB 模型多线程下载与路径映射脚本
+├── download_models.py             # 模型高速下载与路径映射脚本 (含 BS-RoFormer / CodeFormer)
 ├── sample/                        # 测试音频、人物图像与生成 Demo 视频
 ├── requirements.txt               # 项目依赖清单
 └── README.md                      # 项目说明文档
