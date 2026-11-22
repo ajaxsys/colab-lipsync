@@ -17,7 +17,6 @@ huggingface_hub
 demucs
 audio-separator>=0.28.0
 facexlib
-basicsr
 sageattention
 ftfy
 easydict
