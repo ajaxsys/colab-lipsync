@@ -10,6 +10,8 @@ Fixes:
    Prompt embedding forward pass runs on CPU in ~4 seconds and feeds prompt embeddings directly to CUDA.
 3. Vocal Separator CPU Offloading: Prevents ONNX Runtime CUDA BFC arena OOM (Failed to allocate buffer of size 301MB)
    by configuring Kim_Vocal_2 to execute on CPUExecutionProvider and immediately freeing it after extraction.
+4. Audio Encoder CPU Offloading: Reclaims ~3.1GB of GPU VRAM by offloading the Whisper-Large-v3 model to CPU
+   immediately after generating the 30s audio embeddings, leaving >4.5GB free VRAM for DiT diffusion sampling.
 """
 
 import os
@@ -152,8 +154,10 @@ def patch_pipeline_module(pipeline_module_path: str):
 
 def patch_runner_script(runner_path: str):
     """
-    Patches run_demo_avatar_single_audio_to_video.py to run the vocal separator on CPU,
-    preventing ONNX Runtime CUDA BFC arena OOM and preserving GPU VRAM.
+    Patches run_demo_avatar_single_audio_to_video.py:
+    1. Runs vocal separator on CPU to prevent ONNX Runtime CUDA BFC arena OOM.
+    2. Offloads Whisper audio_encoder (~3.1GB) to CPU immediately after embedding generation,
+       freeing >4GB of GPU VRAM for DiT diffusion forward passes.
     """
     if not os.path.exists(runner_path):
         raise FileNotFoundError(f"File not found: {runner_path}")
@@ -177,15 +181,29 @@ def patch_runner_script(runner_path: str):
     else:
         print("ℹ️ Note: vocal_separator already patched or modified in runner.")
 
-    target_del = "        assert speech_array.size > 0, \"No vocal detected\""
-    replace_del = "        assert speech_array.size > 0, \"No vocal detected\"\n        del vocal_separator\n        if torch.cuda.is_available():\n            torch.cuda.empty_cache()"
+    target_del = '        assert speech_array.size > 0, "No vocal detected"'
+    replace_del = '        assert speech_array.size > 0, "No vocal detected"\n        del vocal_separator\n        if torch.cuda.is_available():\n            torch.cuda.empty_cache()'
 
     if target_del in content and "del vocal_separator" not in content:
         content = content.replace(target_del, replace_del)
 
+    # Reclaim Whisper VRAM before diffusion
+    target_audio_offload = "    if local_rank == 0:\n        print(f\"Generating segment 1/{num_segments}...\")"
+    replace_audio_offload = """    # Offload Whisper audio_encoder (~3.1GB) to CPU to guarantee free VRAM for DiT diffusion
+    if hasattr(pipe, "audio_encoder") and pipe.audio_encoder is not None:
+        pipe.audio_encoder = pipe.audio_encoder.to("cpu")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    if local_rank == 0:
+        print(f"Generating segment 1/{num_segments}...")"""
+
+    if target_audio_offload in content and 'pipe.audio_encoder.to("cpu")' not in content:
+        content = content.replace(target_audio_offload, replace_audio_offload)
+
     with open(runner_path, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"✅ Successfully patched {runner_path} (CPU Vocal Separator)")
+    print(f"✅ Successfully patched {runner_path} (CPU Vocal Separator & Whisper Offload)")
 
 
 def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
