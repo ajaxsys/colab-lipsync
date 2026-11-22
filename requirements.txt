@@ -24,3 +24,5 @@ loguru
 moviepy
 scenedetect
 decord
+onnxruntime-gpu>=1.20.0
+nvidia-ml-py
