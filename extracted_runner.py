@@ -1334,29 +1334,63 @@ def main():
                 raise
         raise UserError("显存不够")
 
-    # ---- 输出：画面直接写进视频文件
-    tmp_video = os.path.join(work, "video.mp4")
-    ff = [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
-          "-r", "25", "-i", "-", "-c:v", "libx264", "-crf", str(int(job.get("crf", 17))), "-preset", "medium", "-pix_fmt", "yuv420p", tmp_video]
-    kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
-    writer = subprocess.Popen(ff, stdin=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+    # ---- 断点接续引擎（Checkpoint & Resume Engine）
+    checkpoint_dir = job.get("checkpoint_dir")
+    if not checkpoint_dir:
+        # 自动探测 Google Drive 是否挂载，优先持久化到 Google Drive
+        job_tag = os.path.splitext(os.path.basename(job.get("out", "video")))[0]
+        gdrive_base = "/content/drive/MyDrive/InfiniteTalk_Checkpoints"
+        if os.path.exists("/content/drive/MyDrive"):
+            checkpoint_dir = os.path.join(gdrive_base, job_tag)
+        else:
+            checkpoint_dir = os.path.join(work, "checkpoints")
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    state_file = os.path.join(checkpoint_dir, "checkpoint_state.json")
+
+    start_ci = 0
     written = 0
+    cond_frame = None
+
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                prev_state = json.load(f)
+            last_ci = int(prev_state.get("last_ci", -1))
+            can_resume = (last_ci >= 0 and last_ci + 1 < len(starts))
+            cond_resume_file = os.path.join(checkpoint_dir, f"cond_{last_ci:04d}.pt")
+            if not os.path.exists(cond_resume_file):
+                can_resume = False
+            for i in range(last_ci + 1):
+                if not os.path.exists(os.path.join(checkpoint_dir, f"seg_{i:04d}.mp4")):
+                    can_resume = False
+                    break
+
+            if can_resume:
+                start_ci = last_ci + 1
+                written = int(prev_state.get("written", 0))
+                cond_frame = torch.load(cond_resume_file, map_location=dev).to(torch.float32)
+                emit(info=f"🔄 发现有效检查点！正在从第 {start_ci + 1}/{len(starts)} 段自动断点续跑 (已跳过前 {start_ci} 段已完成画面)")
+                print(f"[checkpoint] Resuming from segment {start_ci}/{len(starts)} using {cond_resume_file}, written={written}")
+        except Exception as e:
+            emit(warn=f"读取检查点异常，将从头开始运行：{e}")
+            start_ci = 0
+            written = 0
+            cond_frame = None
 
     timesteps = list(np.linspace(1000, 1, steps, dtype=np.float32)) + [0.0]
     timesteps = [torch.tensor([t], device=dev) for t in timesteps]
     timesteps = [shift * (t / 1000) / (1 + (shift - 1) * (t / 1000)) * 1000 for t in timesteps]
     indices = torch.arange(5) - 2
     total_calls = len(starts) * steps * passes
-    calls = 0
+    calls = start_ci * steps * passes
     gen_t0 = time.time()
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed % (2**32))
-    cond_frame = None
     from wan.utils.multitalk_utils import match_and_blend_colors
 
     for ci, s in enumerate(starts):
-        first = ci == 0
+        if ci < start_ci:
+            continue
+        first = (ci == 0)
         ref_img, clip_fea, y = conds[ci]
         center = torch.clamp(torch.arange(s, s + FRAMES)[:, None] + indices[None], 0, emb.shape[0] - 1)
         audio = emb[center][None].to(dev).to(torch.bfloat16)
@@ -1364,6 +1398,11 @@ def main():
         cur_lat = 1 + (cur_motion - 1) // 4
         with torch.no_grad():
             motion_lat = vae_encode(ref_img.to(dev) if first else cond_frame)
+
+        # 确保每个片段在断点续跑时随机噪声种子完全确定且一致
+        seg_seed = (seed + ci) if seed >= 0 else int(np.random.randint(0, 2**31))
+        torch.manual_seed(seg_seed)
+        torch.cuda.manual_seed_all(seg_seed)
         noise = torch.randn(16, (FRAMES - 1) // 4 + 1, lat_h, lat_w, dtype=torch.float32, device=dev)
         latent = noise
 
@@ -1397,7 +1436,7 @@ def main():
                 latent[:, : add.shape[1]] = add
             latent[:, :cur_lat] = motion_lat
             el = time.time() - gen_t0
-            left = el / calls * (total_calls - calls) if calls else 0
+            left = el / (calls - start_ci * steps * passes) * (total_calls - calls) if (calls > start_ci * steps * passes) else 0
             stage("gen", f"第 {ci + 1}/{len(starts)} 段，第 {i + 1}/{steps} 步", calls / total_calls * 100)
             emit(eta=int(left), elapsed=int(el))
         with torch.no_grad():
@@ -1409,19 +1448,57 @@ def main():
         frames = ((part.clamp(-1, 1) + 1) / 2 * 255).round().to(torch.uint8).permute(1, 2, 3, 0).numpy()
         n = min(frames.shape[0], total - written)
         if n > 0:
-            try:
-                writer.stdin.write(np.ascontiguousarray(frames[:n]).tobytes())
-            except BrokenPipeError:
-                err = writer.stderr.read().decode("utf-8", "replace")[-300:]
-                raise UserError(f"写入视频失败：{err}")
+            seg_video_path = os.path.join(checkpoint_dir, f"seg_{ci:04d}.mp4")
+            seg_ff = [
+                ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
+                "-r", "25", "-i", "-",
+                "-c:v", "libx264", "-crf", str(int(job.get("crf", 17))),
+                "-preset", "fast", "-pix_fmt", "yuv420p", seg_video_path
+            ]
+            kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
+            p = subprocess.Popen(seg_ff, stdin=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+            p.communicate(input=np.ascontiguousarray(frames[:n]).tobytes())
+            if p.returncode != 0:
+                err = p.stderr.read().decode("utf-8", "replace")[-300:]
+                raise UserError(f"保存分段视频失败：{err}")
+
+            cond_path = os.path.join(checkpoint_dir, f"cond_{ci:04d}.pt")
+            torch.save(cond_frame.cpu(), cond_path)
             written += n
+
+            # 持久化更新检查点状态（原子写入）
+            state_data = {
+                "last_ci": ci,
+                "written": written,
+                "total": total,
+                "width": W,
+                "height": H,
+                "total_segments": len(starts),
+                "seed": seed,
+                "timestamp": time.time()
+            }
+            state_tmp = os.path.join(checkpoint_dir, "checkpoint_state.tmp")
+            with open(state_tmp, "w", encoding="utf-8") as f:
+                json.dump(state_data, f, indent=2)
+            os.replace(state_tmp, state_file)
+
         del video, part, frames, latent
         gc_cuda()
 
-    writer.stdin.close()
-    writer.wait()
-    if writer.returncode != 0:
-        raise UserError("保存视频失败：" + writer.stderr.read().decode("utf-8", "replace")[-300:])
+    # ---- 缝合所有分段视频
+    stage("concat", "缝合分段视频…", 98)
+    seg_list_file = os.path.join(checkpoint_dir, "seg_list.txt")
+    with open(seg_list_file, "w", encoding="utf-8") as f:
+        for i in range(len(starts)):
+            sf = os.path.join(checkpoint_dir, f"seg_{i:04d}.mp4")
+            f.write(f"file '{sf}'\n")
+
+    tmp_video = os.path.join(work, "video.mp4")
+    run_ffmpeg([
+        "-f", "concat", "-safe", "0", "-i", seg_list_file,
+        "-c", "copy", "-y", tmp_video
+    ], "缝合分段视频")
 
     # ---- 配上原曲
     stage("mux", "合成声音…", 100)

@@ -1,17 +1,33 @@
-# 🎙️ Colab InfiniteTalk Lipsync (Wan2.1)
+# 🎙️ Colab InfiniteTalk Lipsync (Wan2.1) & LongCat-Video-Avatar
 
-基于 **Wan2.1 (14B) + InfiniteTalk + LightX2V 蒸馏加速** 的视频对口型工作室 WebUI。针对 Google Colab（A100 / L4）深度定制，提供免安装一键运行 Notebook、防刷新状态回显与 Google Drive 模型极速备份方案。
+基于 **Wan2.1 (14B) + InfiniteTalk** 与 **LongCat-Video-Avatar 1.5/1.6** 的高精度开源数字人工作室。针对 Google Colab（A100 / L4）深度定制，提供免安装一键运行 Notebook、**Google Drive 分段断点续跑引擎（防回收/防崩溃）**、状态持久回显与双旗舰模型横向对比方案。
 
 ---
 
 ## ✨ 核心特性
 
+- **🛡️ Google Drive 毫秒级断点续跑引擎**：长歌曲/长视频生成期间，系统按分段（约 2.85 秒）自动将视频小切片与末尾关键帧张量原子化提交至 Google Drive。即使遭遇 Colab 偶发断联、算力抢占回收，**下次启动直接从断点毫秒级接续，绝不重算白跑**！
 - **一键开箱即用**：提供标准 Jupyter Notebook，一行代码自动配置依赖、模型与穿透网络。
 - **页面刷新自动回显**：前端与后端状态彻底解耦，无论何时刷新浏览器，已上传的图片、音频、参数设置以及生成的视频均自动恢复回显。
 - **物理防重复锁**：点击生成后按钮自动锁定并禁用，后台任务严格单并发排队，杜绝误触多点导致 GPU 显存溢出（OOM）。
 - **智能截取控制**：支持自由指定“只生成前 X 秒”进行快速预览，或一键勾选“整首生成”。
-- **云盘离线兜底备份（可选）**：支持将模型权重归档备份至个人 Google Drive 作为弱网/断网兜底；平时推荐直接通过官方高速 CDN 2~3 分钟直载进 NVMe 高速本地盘。
 - **静音/前奏保护**：内置人声分离门限保护，针对前奏纯伴奏与静音片段，防止底噪被放大导致误张嘴。
+
+---
+
+## ⚔️ 双旗舰数字人模型架构与代际对比
+
+本项目全面支持与评测两大开源数字人旗舰方案：
+
+| 对比维度 | 方案 A：Wan2.1 + InfiniteTalk (本项目默认) | 方案 B：LongCat-Video-Avatar 1.5/1.6 (进阶对比) |
+| :--- | :--- | :--- |
+| **底座基座** | 阿里 **Wan2.1-I2V-14B** (2025 年 2 月) | 美团自研 **LongCat-Video (13.6B)** (2025 年末/2026) |
+| **音频编码器** | **Chinese-Wav2Vec2** (Tencent Games 2021~2022) | **OpenAI Whisper-Large-v3** (2024~2025) |
+| **推理步数与加速** | **4 步蒸馏** (LightX2V CFG-Distill) | **8 步蒸馏** (DMD2 原生蒸馏) |
+| **视觉风格与优势** | **影视级写实真人**：皮肤肌理、眼神光真实感极强 | **高泛化与动作防畸变**：强化学习防手部变形，二次元/动物表现好 |
+| **歌唱咬字表现** | 中文普通话咬字清晰，长转音平稳 | Whisper 加持下，对微弱气口、转音起伏与多语种更敏感 |
+| **断点接续支持** | **✅ 已实装 Google Drive 分段断点引擎** | 依赖一次性批次生成 |
+| **Notebook 入口** | [Colab_InfiniteTalk_Web.ipynb](Colab_InfiniteTalk_Web.ipynb) | [Colab_LongCat_Avatar.ipynb](Colab_LongCat_Avatar.ipynb) |
 
 ---
 
@@ -37,45 +53,26 @@
 
 ## 🚀 快速开始 (Google Colab)
 
+### 选项 1：运行 Wan2.1 + InfiniteTalk (带断点续跑保护)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ajaxsys/colab-lipsync/blob/main/Colab_InfiniteTalk_Web.ipynb)
+直接点击上方徽章打开 [`Colab_InfiniteTalk_Web.ipynb`](Colab_InfiniteTalk_Web.ipynb)，建议在第 2 步后勾选挂载 Google Drive，自动激活防回收断点续跑。
 
-直接点击上方徽章或打开项目内的 [`Colab_InfiniteTalk_Web.ipynb`](Colab_InfiniteTalk_Web.ipynb)，在 Colab 中一键运行：
-
-### 1. 检查显卡
-确保 Colab 运行模式选择为 **GPU** (推荐 A100-40GB 或 L4)：
-```bash
-!nvidia-smi
-```
-
-### 2. 克隆项目与安装依赖
-```bash
-!git clone https://github.com/ajaxsys/colab-lipsync.git /content/colab-lipsync
-%cd /content/colab-lipsync
-!pip install -q -r requirements.txt
-!git clone https://github.com/MeiGen-AI/InfiniteTalk.git /content/InfiniteTalk || true
-```
-
-### 3. 准备模型权重（推荐官方 CDN 直载）
-运行下载脚本，通过千兆高速 CDN 仅需约 2~3 分钟即可将全部权重（Wan2.1 fp8, InfiniteTalk, LoRA, wav2vec, Demucs）直接写入 NVMe 高速本地盘：
-```bash
-python download_models.py
-```
-*(注：Google Drive 备份仅作为可选的离线兜底选项，日常使用直接 CDN 下载更快)*
-
-### 4. 启动 WebUI 与穿透隧道
-```bash
-python app.py
-```
+### 选项 2：运行 LongCat-Video-Avatar 1.5/1.6 (横向效果对比)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/ajaxsys/colab-lipsync/blob/main/Colab_LongCat_Avatar.ipynb)
+直接打开 [`Colab_LongCat_Avatar.ipynb`](Colab_LongCat_Avatar.ipynb)，内置完全相同的 30 秒《崇拜》高潮片段与写实人像素材，对比 Whisper 驱动下的对口型效果。
 
 ---
 
 ## 📂 项目文件结构
 
 ```text
-├── Colab_InfiniteTalk_Web.ipynb   # Colab 一键运行 Notebook
-├── app.py                         # Gradio WebUI 前端交互服务 (含回显与锁定机制)
-├── extracted_runner.py            # 核心推理引擎 (Wan2.1 + InfiniteTalk + 内存动态交换)
+├── Colab_InfiniteTalk_Web.ipynb   # Wan2.1 + InfiniteTalk 一键运行 Notebook (含断点接续)
+├── Colab_LongCat_Avatar.ipynb     # LongCat-Video-Avatar 1.5 对比评测 Notebook
+├── app.py                         # Gradio WebUI 前端交互服务 (含回显、锁定与断点管理)
+├── extracted_runner.py            # 核心推理引擎 (Wan2.1 + InfiniteTalk + 断点持久化)
+├── run_master_a100.py             # A100 全自动双版本 (9:16 + 16:9) 批处理管线
 ├── download_models.py             # 29GB 模型多线程下载与路径映射脚本
+├── sample/                        # 测试音频、人物图像与生成 Demo 视频
 ├── requirements.txt               # 项目依赖清单
 └── README.md                      # 项目说明文档
 ```
@@ -85,4 +82,5 @@ python app.py
 ## 📄 开源与致谢
 - [Wan2.1 (Wan-AI)](https://github.com/Wan-Video/Wan2.1)
 - [InfiniteTalk (MeiGen-AI)](https://github.com/MeiGen-AI/InfiniteTalk)
+- [LongCat-Video (meituan-longcat)](https://github.com/meituan-longcat/LongCat-Video)
 - [LightX2V](https://github.com/Kijai/WanVideo_comfy)

@@ -343,6 +343,7 @@ def build_job_config(image_path, audio_path, prompt, neg_prompt, quality, aspect
         "accel": bool(accel),
         "sage": bool(sage),
         "color_fix": 1.0,
+        "checkpoint_dir": os.path.join("/content/drive/MyDrive/InfiniteTalk_Checkpoints", f"job_{w}x{h}") if os.path.exists("/content/drive/MyDrive") else os.path.join(WORK_DIR, "checkpoints"),
         "models": {
             "base": os.path.join(MODELS_DIR, "base"),
             "dit": os.path.join(MODELS_DIR, "dit", "Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors"),

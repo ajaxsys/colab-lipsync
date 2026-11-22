@@ -16,8 +16,6 @@ workspace/
 *.mp4
 *.wav
 *.png
-*.jpg
-*.jpeg
 *.log
 cf.log
 perf.log
@@ -26,3 +24,8 @@ perf.log
 *_amd64/
 LocModel*
 *.deb
+
+# Track sample test assets and demo
+!sample/
+!sample/**
+sample/output_*.mp4
