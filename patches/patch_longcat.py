@@ -8,6 +8,8 @@ Fixes:
 2. Text Encoder CPU Offloading: Prevents CUDA OOM on 24GB GPUs by keeping the 9.5GB UMT5-XXL text encoder
    resident on CPU RAM rather than cramming it into GPU VRAM alongside DiT (14GB) and Whisper (3GB).
    Prompt embedding forward pass runs on CPU in ~4 seconds and feeds prompt embeddings directly to CUDA.
+3. Vocal Separator CPU Offloading: Prevents ONNX Runtime CUDA BFC arena OOM (Failed to allocate buffer of size 301MB)
+   by configuring Kim_Vocal_2 to execute on CPUExecutionProvider and immediately freeing it after extraction.
 """
 
 import os
@@ -148,14 +150,55 @@ def patch_pipeline_module(pipeline_module_path: str):
     print(f"✅ Successfully patched {pipeline_module_path} (CPU Text Encoder Offload)")
 
 
+def patch_runner_script(runner_path: str):
+    """
+    Patches run_demo_avatar_single_audio_to_video.py to run the vocal separator on CPU,
+    preventing ONNX Runtime CUDA BFC arena OOM and preserving GPU VRAM.
+    """
+    if not os.path.exists(runner_path):
+        raise FileNotFoundError(f"File not found: {runner_path}")
+
+    with open(runner_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    target_cuda_sep = """    if vocal_separator.onnx_execution_provider == ["CUDAExecutionProvider"]:
+        vocal_separator.onnx_execution_provider = [
+            (
+                "CUDAExecutionProvider",
+                {"device_id": local_rank, "cudnn_conv_algo_search": "HEURISTIC"},
+            )
+        ]"""
+
+    replace_cpu_sep = """    # Run vocal separator on CPU to prevent ONNX Runtime CUDA BFC arena OOM on 24GB GPUs
+    vocal_separator.onnx_execution_provider = ["CPUExecutionProvider"]"""
+
+    if target_cuda_sep in content:
+        content = content.replace(target_cuda_sep, replace_cpu_sep)
+    else:
+        print("ℹ️ Note: vocal_separator already patched or modified in runner.")
+
+    target_del = "        assert speech_array.size > 0, \"No vocal detected\""
+    replace_del = "        assert speech_array.size > 0, \"No vocal detected\"\n        del vocal_separator\n        if torch.cuda.is_available():\n            torch.cuda.empty_cache()"
+
+    if target_del in content and "del vocal_separator" not in content:
+        content = content.replace(target_del, replace_del)
+
+    with open(runner_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"✅ Successfully patched {runner_path} (CPU Vocal Separator)")
+
+
 def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
     quant_path = os.path.join(repo_dir, "longcat_video", "modules", "quantization.py")
     pipe_path = os.path.join(repo_dir, "longcat_video", "pipeline_longcat_video_avatar.py")
+    runner_path = os.path.join(repo_dir, "run_demo_avatar_single_audio_to_video.py")
 
     if os.path.exists(quant_path):
         patch_quantization_module(quant_path)
     if os.path.exists(pipe_path):
         patch_pipeline_module(pipe_path)
+    if os.path.exists(runner_path):
+        patch_runner_script(runner_path)
 
 
 if __name__ == "__main__":
