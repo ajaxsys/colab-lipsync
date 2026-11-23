@@ -22,7 +22,8 @@ def run_cmd(cmd, cwd=None, env=None):
     run_env = os.environ.copy()
     if env:
         run_env.update(env)
-    res = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), env=run_env)
+    # Use start_new_session=True to detach child process group and prevent SIGHUP on SSH disconnect
+    res = subprocess.run(cmd, cwd=cwd, shell=isinstance(cmd, str), env=run_env, start_new_session=True)
     if res.returncode != 0:
         raise RuntimeError(f"Command failed with return code {res.returncode}")
 
