@@ -10,7 +10,7 @@
 | :--- | :--- | :--- | :--- |
 | **[v1.0_baseline_report.md](v1.0_baseline_report.md)** | **Wan2.1 (14B) + InfiniteTalk (Chinese-Wav2Vec2) + HTDemucs** | NVIDIA A100-40GB | **基线版本**：实测 4 步 Flow-Matching，13.3s/步，单段 59s。验证了 14B 底座与 63s 长视频稳定性，暴露了伴奏唇动误触与 25fps 顿挫短板。 |
 | **[v1.1_upgrade_report.md](v1.1_upgrade_report.md)** | **Wan2.1 (14B) + InfiniteTalk + BS-RoFormer + 60fps RIFE** | NVIDIA A100-40GB | **重大升级成片**：引入 2025 SOTA BS-RoFormer (SDR 12.97 dB)，彻底杜绝伴奏底噪误触发；补齐 60fps 运动补偿与片尾声画渐隐，整场仅耗 3.79 计算点。 |
-| **[v1.6_longcat_benchmark.md](v1.6_longcat_benchmark.md)** | **LongCat-Video-Avatar 1.6 (13.6B INT8 + Whisper-v3 + 8步蒸馏 LoRA)** | NVIDIA L4-24GB | **次世代轻量化**：美团 13.6B 底座 + Whisper-Large-v3。实装 Zero-RAM 元设备初始化、原地 FP32 调制优化与全自动断点续存，攻克 24GB L4 全长 30.48 秒 (762帧) 无黑帧无 OOM 完整渲染。 |
+| **[v1.6_longcat_benchmark.md](v1.6_longcat_benchmark.md)** | **LongCat-Video-Avatar 1.6 (美团 13.6B BF16 + Whisper-v3 + 8步蒸馏 LoRA)** | **NVIDIA A100-80GB (全精度)** / L4-24GB (对比) | **🔥 巅峰交付版**：美团 13.6B 原生 BF16 全精度底座 + Whisper-Large-v3。彻底根除 L4 上的 Confetti 彩噪与纯黑，单步 13.2s，全片 17 分 30 秒产出 30.48 秒 (762帧) 电影级口型咬字成片。 |
 
 ---
 
@@ -21,5 +21,4 @@
 - `snap_v2_5s.jpg`, `snap_v2_15s.jpg`, `snap_v2_25s.jpg`：v1.1 增强版咬字与光影细节
 - `snap_v2_fade_28_8s.jpg`：v1.1 片尾声画双平滑淡出黑屏截图
 - `crop_portrait_preview.jpg`：人物主体 9:16 构图裁切预处理基准
-- `longcat_final_1s.png`, `longcat_final_5s.png`, `longcat_final_15s.png`, `longcat_final_25s.png`, `longcat_final_30s.png`：v1.6 美团 LongCat 全长 30 秒关键帧高动态实测采样
-- `longcat_seg1_frame0_fixed.png`, `longcat_seg1_frame1s_fixed.png`, `longcat_seg1_frame2s_fixed.png`：SDPA 注意力修复后 Segment 1 验证采样
+- `longcat_final_1s.png`, `longcat_final_5s.png`, `longcat_final_15s.png`, `longcat_final_25s.png`, `longcat_final_30s.png`：v1.6 美团 LongCat A100-80GB 原生 BF16 全长 30 秒关键帧高动态实测采样
