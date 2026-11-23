@@ -29,8 +29,8 @@ def run_cmd(cmd, cwd=None, env=None):
 
 def main():
     parser = argparse.ArgumentParser(description="Run LongCat-Video-Avatar 1.6 with zero-RAM and CPU-offload patches")
-    parser.add_argument("--image", required=True, help="Input portrait image path")
-    parser.add_argument("--audio", required=True, help="Input audio singing file path")
+    parser.add_argument("--image", default="sample/girl_9x16.jpeg", help="Input portrait image path")
+    parser.add_argument("--audio", default="sample/audio_cut_30s.mp3", help="Input audio singing file path")
     parser.add_argument("--output_dir", default="./output_longcat", help="Output directory")
     parser.add_argument("--num_segments", type=int, default=10, help="Number of segments (10 for ~30s)")
     parser.add_argument("--resolution", default="480p", choices=["480p", "720p"], help="Video resolution")
