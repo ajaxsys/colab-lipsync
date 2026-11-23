@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--num_inference_steps", type=int, default=8, help="Distilled inference steps (default: 8)")
     parser.add_argument("--text_guidance_scale", type=float, default=1.0, help="Text guidance scale (default: 1.0 for distilled)")
     parser.add_argument("--audio_guidance_scale", type=float, default=1.0, help="Audio guidance scale (default: 1.0 for distilled)")
+    parser.add_argument("--use_int8", action="store_true", help="Enable INT8 quantization (only needed on 24GB GPUs; disable on A100/H100)")
     args = parser.parse_args()
 
     image_path = os.path.abspath(args.image)
@@ -90,7 +91,6 @@ def main():
         "--lora_path=loraB/lora.safetensors",
         "--mix_steps=4",
         "--mix_alpha=1.0",
-        "--use_int8",
         f"--resolution={args.resolution}",
         f"--num_segments={args.num_segments}",
         f"--num_inference_steps={args.num_inference_steps}",
@@ -98,6 +98,8 @@ def main():
         f"--audio_guidance_scale={args.audio_guidance_scale}",
         "--save_every_segment"
     ]
+    if args.use_int8:
+        cmd.append("--use_int8")
     run_cmd(cmd, cwd=repo_dir, env=env_vars)
 
 
