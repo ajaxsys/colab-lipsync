@@ -495,6 +495,111 @@ def patch_attention_module(attention_module_path: str):
     print(f"✅ Successfully patched {attention_module_path} (Native PyTorch SDPA FlashAttention fallback)")
 
 
+def patch_base_attention_module(attention_module_path: str):
+    """
+    Patches longcat_video/modules/attention.py to support PyTorch native
+    scaled_dot_product_attention (SDPA) when flash_attn is not installed.
+    """
+    if not os.path.exists(attention_module_path):
+        raise FileNotFoundError(f"File not found: {attention_module_path}")
+
+    with open(attention_module_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # 1. Patch self-attention in _process_attn
+    target_attn = '''        elif self.enable_flashattn2:
+            from flash_attn import flash_attn_func
+            q = rearrange(q, "B H S D -> B S H D")
+            k = rearrange(k, "B H S D -> B S H D")
+            v = rearrange(v, "B H S D -> B S H D")
+            x = flash_attn_func(
+                q,
+                k,
+                v,
+                dropout_p=0.0,
+                softmax_scale=self.scale,
+            )
+            x = rearrange(x, "B S H D -> B H S D")'''
+
+    replace_attn = '''        elif self.enable_flashattn2:
+            try:
+                from flash_attn import flash_attn_func
+                q = rearrange(q, "B H S D -> B S H D")
+                k = rearrange(k, "B H S D -> B S H D")
+                v = rearrange(v, "B H S D -> B S H D")
+                x = flash_attn_func(
+                    q,
+                    k,
+                    v,
+                    dropout_p=0.0,
+                    softmax_scale=self.scale,
+                )
+                x = rearrange(x, "B S H D -> B H S D")
+            except ImportError:
+                import torch.nn.functional as F
+                x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)'''
+
+    if target_attn in content:
+        content = content.replace(target_attn, replace_attn)
+    else:
+        print("ℹ️ Note: base _process_attn already patched or modified.")
+
+    # 2. Patch varlen cross-attention in _process_cross_attn
+    target_cross = '''        elif self.enable_flashattn2:
+            from flash_attn import flash_attn_varlen_func
+            x = flash_attn_varlen_func(
+                q=q[0],
+                k=k[0],
+                v=v[0],
+                cu_seqlens_q=torch.tensor([0] + [N] * B, device=q.device).cumsum(0).to(torch.int32),
+                cu_seqlens_k=torch.tensor([0] + kv_seqlen, device=q.device).cumsum(0).to(torch.int32),
+                max_seqlen_q=N,
+                max_seqlen_k=max(kv_seqlen),
+            )'''
+
+    replace_cross = '''        elif self.enable_flashattn2:
+            try:
+                from flash_attn import flash_attn_varlen_func
+                x = flash_attn_varlen_func(
+                    q=q[0],
+                    k=k[0],
+                    v=v[0],
+                    cu_seqlens_q=torch.tensor([0] + [N] * B, device=q.device).cumsum(0).to(torch.int32),
+                    cu_seqlens_k=torch.tensor([0] + kv_seqlen, device=q.device).cumsum(0).to(torch.int32),
+                    max_seqlen_q=N,
+                    max_seqlen_k=max(kv_seqlen),
+                )
+            except ImportError:
+                import torch.nn.functional as F
+                if B == 1:
+                    q_b = q[0].unsqueeze(0).transpose(1, 2)
+                    k_b = k[0].unsqueeze(0).transpose(1, 2)
+                    v_b = v[0].unsqueeze(0).transpose(1, 2)
+                    x_b = F.scaled_dot_product_attention(q_b, k_b, v_b, scale=self.scale)
+                    x = x_b.transpose(1, 2).squeeze(0)
+                else:
+                    out_list = []
+                    k_offset = 0
+                    for b in range(B):
+                        q_b = q[0, b*N:(b+1)*N].unsqueeze(0).transpose(1, 2)
+                        sk = kv_seqlen[b]
+                        k_b = k[0, k_offset:k_offset+sk].unsqueeze(0).transpose(1, 2)
+                        v_b = v[0, k_offset:k_offset+sk].unsqueeze(0).transpose(1, 2)
+                        k_offset += sk
+                        x_b = F.scaled_dot_product_attention(q_b, k_b, v_b, scale=self.scale)
+                        out_list.append(x_b.transpose(1, 2).squeeze(0))
+                    x = torch.cat(out_list, dim=0)'''
+
+    if target_cross in content:
+        content = content.replace(target_cross, replace_cross)
+    else:
+        print("ℹ️ Note: base _process_cross_attn already patched or modified.")
+
+    with open(attention_module_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"✅ Successfully patched {attention_module_path} (Base DiT SDPA Attention fallback)")
+
+
 def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
     quant_path = os.path.join(repo_dir, "longcat_video", "modules", "quantization.py")
     pipe_path = os.path.join(repo_dir, "longcat_video", "pipeline_longcat_video_avatar.py")
@@ -502,6 +607,7 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
     dit_avatar_path = os.path.join(repo_dir, "longcat_video", "modules", "avatar", "longcat_video_dit_avatar.py")
     rope_path = os.path.join(repo_dir, "longcat_video", "modules", "avatar", "rope_3d.py")
     attn_path = os.path.join(repo_dir, "longcat_video", "modules", "avatar", "attention.py")
+    base_attn_path = os.path.join(repo_dir, "longcat_video", "modules", "attention.py")
 
     if os.path.exists(quant_path):
         patch_quantization_module(quant_path)
@@ -515,6 +621,8 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
         patch_rope_module(rope_path)
     if os.path.exists(attn_path):
         patch_attention_module(attn_path)
+    if os.path.exists(base_attn_path):
+        patch_base_attention_module(base_attn_path)
 
 
 if __name__ == "__main__":
