@@ -545,6 +545,11 @@ def patch_base_attention_module(attention_module_path: str):
         print("ℹ️ Note: base _process_attn already patched or modified.")
 
     # 2. Patch varlen cross-attention in _process_cross_attn
+    old_sdpa = "scale=self.scale"
+    new_sdpa = "scale=getattr(self, 'scale', self.head_dim ** -0.5)"
+    if old_sdpa in content:
+        content = content.replace(old_sdpa, new_sdpa)
+
     target_cross = '''        elif self.enable_flashattn2:
             from flash_attn import flash_attn_varlen_func
             x = flash_attn_varlen_func(
@@ -571,11 +576,12 @@ def patch_base_attention_module(attention_module_path: str):
                 )
             except ImportError:
                 import torch.nn.functional as F
+                attn_scale = getattr(self, "scale", self.head_dim ** -0.5)
                 if B == 1:
                     q_b = q[0].unsqueeze(0).transpose(1, 2)
                     k_b = k[0].unsqueeze(0).transpose(1, 2)
                     v_b = v[0].unsqueeze(0).transpose(1, 2)
-                    x_b = F.scaled_dot_product_attention(q_b, k_b, v_b, scale=self.scale)
+                    x_b = F.scaled_dot_product_attention(q_b, k_b, v_b, scale=attn_scale)
                     x = x_b.transpose(1, 2).squeeze(0)
                 else:
                     out_list = []
@@ -586,12 +592,14 @@ def patch_base_attention_module(attention_module_path: str):
                         k_b = k[0, k_offset:k_offset+sk].unsqueeze(0).transpose(1, 2)
                         v_b = v[0, k_offset:k_offset+sk].unsqueeze(0).transpose(1, 2)
                         k_offset += sk
-                        x_b = F.scaled_dot_product_attention(q_b, k_b, v_b, scale=self.scale)
+                        x_b = F.scaled_dot_product_attention(q_b, k_b, v_b, scale=attn_scale)
                         out_list.append(x_b.transpose(1, 2).squeeze(0))
                     x = torch.cat(out_list, dim=0)'''
 
     if target_cross in content:
         content = content.replace(target_cross, replace_cross)
+    elif "getattr(self, 'scale'" in content or 'getattr(self, "scale"' in content:
+        print("ℹ️ Note: base _process_cross_attn already patched with getattr scale.")
     else:
         print("ℹ️ Note: base _process_cross_attn already patched or modified.")
 
