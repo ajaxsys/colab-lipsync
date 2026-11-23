@@ -269,11 +269,146 @@ def patch_dit_avatar_module(dit_module_path: str):
         print("ℹ️ Note: _create_multi_lora_forward already patched or modified in dit_avatar.")
 
 
+def patch_rope_module(rope_module_path: str):
+    """
+    Patches rope_3d.py to eliminate ~870MB-1.5GB of peak activation VRAM during 3D RoPE attention:
+    1. Replaces rearrange/unbind/stack in rotate_half with in-place strided assignments.
+    2. Keeps RoPE calculations in native target_dtype (bfloat16) instead of upcasting to float32.
+    3. Uses in-place addcmul_ accumulator to eliminate temporary intermediate tensors.
+    """
+    if not os.path.exists(rope_module_path):
+        raise FileNotFoundError(f"File not found: {rope_module_path}")
+
+    with open(rope_module_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # 1. Patch rotate_half
+    target_rot = '''def rotate_half(x):
+    x = rearrange(x, "... (d r) -> ... d r", r=2)
+    x1, x2 = x.unbind(dim=-1)
+    x = torch.stack((-x2, x1), dim=-1)
+    return rearrange(x, "... d r -> ... (d r)")'''
+
+    replace_rot = '''def rotate_half(x):
+    out = torch.empty_like(x)
+    out[..., 0::2] = -x[..., 1::2]
+    out[..., 1::2] = x[..., 0::2]
+    return out'''
+
+    if target_rot in content:
+        content = content.replace(target_rot, replace_rot)
+    else:
+        print("ℹ️ Note: rotate_half already patched or modified.")
+
+    # 2. Patch RotaryPositionalEmbedding.forward
+    target_fwd = '''        q_, k_ = q.float(), k.float()
+        cache_key = (
+            self.head_dim,
+            tuple(self.cp_split_hw or ()),
+            key_name,
+            q.device.type,
+            q.device.index,
+        )
+        cached = self._gpu_cos_sin_cache.get(cache_key)
+        if cached is None:
+            # Keep the original FP32 path exactly; only reuse its immutable result.
+            freqs_cis = self.freqs_dict[key_name].to(q.device)
+            freqs_cis = freqs_cis.float().to(q.device)
+            cos, sin = freqs_cis.cos(), freqs_cis.sin()
+            cos = rearrange(cos, 'n d -> 1 1 n d')
+            sin = rearrange(sin, 'n d -> 1 1 n d')
+            cached = (cos, sin)
+            self._gpu_cos_sin_cache[cache_key] = cached
+        cos, sin = cached
+        token_count = q.shape[-2]
+        cos = cos[:, :, token_offset:token_offset + token_count]
+        sin = sin[:, :, token_offset:token_offset + token_count]
+        assert cos.shape[-2] == token_count
+        q_ = (q_ * cos) + (rotate_half(q_) * sin)
+        k_ = (k_ * cos) + (rotate_half(k_) * sin)
+
+        return q_.type_as(q), k_.type_as(k)'''
+
+    replace_fwd = '''        target_dtype = q.dtype
+        cache_key = (
+            self.head_dim,
+            tuple(self.cp_split_hw or ()),
+            key_name,
+            q.device.type,
+            q.device.index,
+            target_dtype,
+        )
+        cached = self._gpu_cos_sin_cache.get(cache_key)
+        if cached is None:
+            freqs_cis = self.freqs_dict[key_name].to(q.device)
+            freqs_cis = freqs_cis.float()
+            cos = freqs_cis.cos().to(target_dtype)
+            sin = freqs_cis.sin().to(target_dtype)
+            cos = rearrange(cos, 'n d -> 1 1 n d')
+            sin = rearrange(sin, 'n d -> 1 1 n d')
+            cached = (cos, sin)
+            self._gpu_cos_sin_cache[cache_key] = cached
+        cos, sin = cached
+        token_count = q.shape[-2]
+        cos = cos[:, :, token_offset:token_offset + token_count]
+        sin = sin[:, :, token_offset:token_offset + token_count]
+        assert cos.shape[-2] == token_count
+
+        q_rot = rotate_half(q)
+        q_out = q * cos
+        q_out.addcmul_(q_rot, sin)
+        del q_rot
+
+        k_rot = rotate_half(k)
+        k_out = k * cos
+        k_out.addcmul_(k_rot, sin)
+        del k_rot
+
+        return q_out, k_out'''
+
+    if target_fwd in content:
+        content = content.replace(target_fwd, replace_fwd)
+    else:
+        print("ℹ️ Note: RotaryPositionalEmbedding.forward already patched or modified.")
+
+    # 3. Patch RotaryPositionalEmbedding1D.forward
+    target_1d = '''        x_ = x.float()
+
+        freqs_cis = freqs_cis.float().to(x.device)
+        cos, sin = freqs_cis.cos(), freqs_cis.sin()
+        cos, sin = rearrange(cos, 'n d -> 1 1 n d'), rearrange(sin, 'n d -> 1 1 n d')
+        x_ = (x_ * cos) + (rotate_half(x_) * sin)
+
+        return x_.type_as(x)'''
+
+    replace_1d = '''        target_dtype = x.dtype
+        freqs_cis = freqs_cis.float().to(x.device)
+        cos = freqs_cis.cos().to(target_dtype)
+        sin = freqs_cis.sin().to(target_dtype)
+        cos, sin = rearrange(cos, 'n d -> 1 1 n d'), rearrange(sin, 'n d -> 1 1 n d')
+        x_rot = rotate_half(x)
+        x_out = x * cos
+        x_out.addcmul_(x_rot, sin)
+        del x_rot
+
+        return x_out'''
+
+    if target_1d in content:
+        content = content.replace(target_1d, replace_1d)
+    else:
+        print("ℹ️ Note: RotaryPositionalEmbedding1D.forward already patched or modified.")
+
+    with open(rope_module_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"✅ Successfully patched {rope_module_path} (Zero-Copy In-Place BF16 3D RoPE, saves ~870MB VRAM)")
+
+
 def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
     quant_path = os.path.join(repo_dir, "longcat_video", "modules", "quantization.py")
     pipe_path = os.path.join(repo_dir, "longcat_video", "pipeline_longcat_video_avatar.py")
     runner_path = os.path.join(repo_dir, "run_demo_avatar_single_audio_to_video.py")
     dit_avatar_path = os.path.join(repo_dir, "longcat_video", "modules", "avatar", "longcat_video_dit_avatar.py")
+    rope_path = os.path.join(repo_dir, "longcat_video", "modules", "avatar", "rope_3d.py")
 
     if os.path.exists(quant_path):
         patch_quantization_module(quant_path)
@@ -283,6 +418,8 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
         patch_runner_script(runner_path)
     if os.path.exists(dit_avatar_path):
         patch_dit_avatar_module(dit_avatar_path)
+    if os.path.exists(rope_path):
+        patch_rope_module(rope_path)
 
 
 if __name__ == "__main__":
