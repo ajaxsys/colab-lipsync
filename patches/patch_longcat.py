@@ -151,8 +151,10 @@ def patch_pipeline_module(pipeline_module_path: str):
     target_decode = "    def _decode_video_latents(self, latents):\n        cp_size = context_parallel_util.get_cp_size()"
     replace_decode = "    def _decode_video_latents(self, latents):\n        if torch.cuda.is_available():\n            torch.cuda.empty_cache()\n        cp_size = context_parallel_util.get_cp_size()"
 
-    if target_decode in content and "empty_cache()" not in content:
+    if target_decode in content:
         content = content.replace(target_decode, replace_decode)
+    else:
+        print("ℹ️ Note: _decode_video_latents already patched or modified.")
 
     # 4. Patch denoising steps with nan_to_num protection against numerical instability
     target_step = "latents[:, :, 1:] = self.scheduler.step(noise_pred[:, :, 1:], t, latents[:, :, 1:], return_dict=False)[0]"
@@ -201,6 +203,17 @@ def patch_runner_script(runner_path: str):
     if target_del in content and "del vocal_separator" not in content:
         content = content.replace(target_del, replace_del)
 
+    # Enable VAE tiling and slicing to cut VAE decode memory from 5.5GB to <700MB, preventing VAE OOM
+    target_pipe_init = "    pipe.to(local_rank)"
+    replace_pipe_init = """    pipe.to(local_rank)
+    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
+        pipe.vae.enable_tiling()
+        pipe.vae.enable_slicing()
+        pipe.vae.enable_decoder_fused_padding()"""
+
+    if target_pipe_init in content and "enable_tiling" not in content:
+        content = content.replace(target_pipe_init, replace_pipe_init)
+
     # Reclaim Whisper VRAM before diffusion
     target_audio_offload = "    if local_rank == 0:\n        print(f\"Generating segment 1/{num_segments}...\")"
     replace_audio_offload = """    # Reclaim ~3.1GB GPU VRAM by thoroughly deleting Whisper audio_encoder before diffusion
@@ -222,6 +235,12 @@ def patch_runner_script(runner_path: str):
 
     if target_audio_offload in content and "del pipe.audio_encoder" not in content:
         content = content.replace(target_audio_offload, replace_audio_offload)
+
+    # Free cache after each segment
+    target_seg_gc = "        del output\n\n        appended_frames = new_video_array[num_cond_frames:]"
+    replace_seg_gc = "        del output\n        if torch.cuda.is_available():\n            torch.cuda.empty_cache()\n\n        appended_frames = new_video_array[num_cond_frames:]"
+    if target_seg_gc in content and "torch.cuda.empty_cache()" not in content[content.find("del output"):content.find("del output")+100]:
+        content = content.replace(target_seg_gc, replace_seg_gc)
 
     with open(runner_path, "w", encoding="utf-8") as f:
         f.write(content)
