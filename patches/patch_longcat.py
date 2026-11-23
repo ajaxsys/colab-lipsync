@@ -895,7 +895,7 @@ def patch_blocks_module(blocks_path: str):
         f.write(content)
 
 
-def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
+def apply_all_patches(repo_dir: str = "/content/LongCat-Video", target_gpu: str = "A100"):
     quant_path = os.path.join(repo_dir, "longcat_video", "modules", "quantization.py")
     pipe_path = os.path.join(repo_dir, "longcat_video", "pipeline_longcat_video_avatar.py")
     runner_path = os.path.join(repo_dir, "run_demo_avatar_single_audio_to_video.py")
@@ -906,26 +906,34 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
     blocks_path = os.path.join(repo_dir, "longcat_video", "modules", "blocks.py")
     vae_path = os.path.join(repo_dir, "longcat_video", "modules", "autoencoder_kl_wan.py")
 
-    if os.path.exists(quant_path):
-        patch_quantization_module(quant_path)
-    if os.path.exists(pipe_path):
-        patch_pipeline_module(pipe_path)
-    if os.path.exists(runner_path):
-        patch_runner_script(runner_path)
-    if os.path.exists(dit_avatar_path):
-        patch_dit_avatar_module(dit_avatar_path)
-    if os.path.exists(rope_path):
-        patch_rope_module(rope_path)
+    # Essential SDPA compatibility & checkpointing for all GPUs
     if os.path.exists(attn_path):
         patch_attention_module(attn_path)
     if os.path.exists(base_attn_path):
         patch_base_attention_module(base_attn_path)
-    if os.path.exists(blocks_path):
-        patch_blocks_module(blocks_path)
+    if os.path.exists(runner_path):
+        patch_runner_script(runner_path)
     if os.path.exists(vae_path):
         patch_vae_module(vae_path)
+
+    if target_gpu != "A100":
+        # Memory-saving patches only needed on memory-constrained 24GB GPUs (NVIDIA L4 / RTX 4090)
+        print("🔧 Applying 24GB GPU memory-saving patches (CPU offload, in-place SwiGLU, FP32 modulation)...")
+        if os.path.exists(quant_path):
+            patch_quantization_module(quant_path)
+        if os.path.exists(pipe_path):
+            patch_pipeline_module(pipe_path)
+        if os.path.exists(dit_avatar_path):
+            patch_dit_avatar_module(dit_avatar_path)
+        if os.path.exists(rope_path):
+            patch_rope_module(rope_path)
+        if os.path.exists(blocks_path):
+            patch_blocks_module(blocks_path)
+    else:
+        print("🚀 Target GPU is A100 (80GB VRAM): skipping VAE CPU offload and aggressive quantization to preserve 100% full precision fidelity.")
 
 
 if __name__ == "__main__":
     target_repo = sys.argv[1] if len(sys.argv) > 1 else "/content/LongCat-Video"
-    apply_all_patches(target_repo)
+    gpu_type = sys.argv[2] if len(sys.argv) > 2 else "A100"
+    apply_all_patches(target_repo, target_gpu=gpu_type)

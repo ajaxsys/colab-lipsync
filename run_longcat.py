@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--text_guidance_scale", type=float, default=1.0, help="Text guidance scale (default: 1.0 for distilled)")
     parser.add_argument("--audio_guidance_scale", type=float, default=1.0, help="Audio guidance scale (default: 1.0 for distilled)")
     parser.add_argument("--use_int8", action="store_true", help="Enable INT8 quantization (only needed on 24GB GPUs; disable on A100/H100)")
+    parser.add_argument("--target_gpu", default="A100", choices=["A100", "L4", "4090"], help="Target GPU architecture (default: A100)")
     args = parser.parse_args()
 
     image_path = os.path.abspath(args.image)
@@ -73,7 +74,7 @@ def main():
     if patch_module_path.exists():
         sys.path.insert(0, str(Path(__file__).parent))
         from patches.patch_longcat import apply_all_patches
-        apply_all_patches(repo_dir)
+        apply_all_patches(repo_dir, target_gpu=args.target_gpu)
 
     # 3. Launch torchrun with PyTorch memory fragmentation configuration
     env_vars = {
