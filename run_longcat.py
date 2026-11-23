@@ -28,9 +28,13 @@ def run_cmd(cmd, cwd=None, env=None):
 
 
 def main():
+    base_dir = Path(__file__).resolve().parent
+    default_image = str(base_dir / "sample" / "girl_9x16.jpeg")
+    default_audio = str(base_dir / "sample" / "audio_cut_30s.mp3")
+
     parser = argparse.ArgumentParser(description="Run LongCat-Video-Avatar 1.6 with zero-RAM and CPU-offload patches")
-    parser.add_argument("--image", default="sample/girl_9x16.jpeg", help="Input portrait image path")
-    parser.add_argument("--audio", default="sample/audio_cut_30s.mp3", help="Input audio singing file path")
+    parser.add_argument("--image", default=default_image, help="Input portrait image path")
+    parser.add_argument("--audio", default=default_audio, help="Input audio singing file path")
     parser.add_argument("--output_dir", default="./output_longcat", help="Output directory")
     parser.add_argument("--num_segments", type=int, default=10, help="Number of segments (10 for ~30s)")
     parser.add_argument("--resolution", default="480p", choices=["480p", "720p"], help="Video resolution")
@@ -39,6 +43,13 @@ def main():
     parser.add_argument("--audio_guidance_scale", type=float, default=1.0, help="Audio guidance scale (default: 1.0 for distilled)")
     args = parser.parse_args()
 
+    image_path = os.path.abspath(args.image)
+    audio_path = os.path.abspath(args.audio)
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image not found: {image_path}")
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"Audio not found: {audio_path}")
+
     repo_dir = "/content/LongCat-Video"
     weights_dir = f"{repo_dir}/weights/LongCat-Video-Avatar-1.6"
     job_json_path = "/content/job_longcat.json"
@@ -46,9 +57,9 @@ def main():
     # 1. Create job json
     job_data = {
         "prompt": "A beautiful girl singing emotionally, ultra realistic, detailed facial expression, cinematic lighting, 8k masterpiece",
-        "cond_image": os.path.abspath(args.image),
+        "cond_image": image_path,
         "cond_audio": {
-            "person1": os.path.abspath(args.audio)
+            "person1": audio_path
         }
     }
     with open(job_json_path, "w", encoding="utf-8") as f:
