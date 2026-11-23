@@ -189,17 +189,30 @@ def patch_runner_script(runner_path: str):
 
     # Reclaim Whisper VRAM before diffusion
     target_audio_offload = "    if local_rank == 0:\n        print(f\"Generating segment 1/{num_segments}...\")"
-    replace_audio_offload = """    # Offload Whisper audio_encoder (~3.1GB) to CPU to guarantee free VRAM for DiT diffusion
-    if hasattr(pipe, "audio_encoder") and pipe.audio_encoder is not None:
-        pipe.audio_encoder = pipe.audio_encoder.to("cpu")
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    replace_audio_offload = """    # Reclaim ~3.1GB GPU VRAM by thoroughly deleting Whisper audio_encoder before diffusion
+    try:
+        del audio_encoder
+    except Exception:
+        pass
+    if hasattr(pipe, "audio_encoder"):
+        del pipe.audio_encoder
+    if hasattr(pipe, "audio_feature_extractor"):
+        del pipe.audio_feature_extractor
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     if local_rank == 0:
         print(f"Generating segment 1/{num_segments}...")"""
 
-    if target_audio_offload in content and 'pipe.audio_encoder.to("cpu")' not in content:
+    if target_audio_offload in content and "del pipe.audio_encoder" not in content:
         content = content.replace(target_audio_offload, replace_audio_offload)
+    elif 'pipe.audio_encoder = pipe.audio_encoder.to("cpu")' in content:
+        content = content.replace(
+            'pipe.audio_encoder = pipe.audio_encoder.to("cpu")',
+            'try:\n        del audio_encoder\n    except Exception:\n        pass\n    del pipe.audio_encoder\n    import gc; gc.collect()'
+        )
 
     with open(runner_path, "w", encoding="utf-8") as f:
         f.write(content)

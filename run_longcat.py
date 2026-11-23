@@ -83,7 +83,8 @@ def main():
         f"--num_segments={args.num_segments}",
         f"--num_inference_steps={args.num_inference_steps}",
         f"--text_guidance_scale={args.text_guidance_scale}",
-        f"--audio_guidance_scale={args.audio_guidance_scale}"
+        f"--audio_guidance_scale={args.audio_guidance_scale}",
+        "--save_every_segment"
     ]
     run_cmd(cmd, cwd=repo_dir, env=env_vars)
 
