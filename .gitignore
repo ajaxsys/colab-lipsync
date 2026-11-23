@@ -16,6 +16,7 @@ workspace/
 *.mp4
 *.wav
 *.png
+!reports/assets/*.png
 *.log
 cf.log
 perf.log
@@ -29,3 +30,5 @@ LocModel*
 !sample/
 !sample/**
 sample/output_*.mp4
+sample/longcat_segment_*.mp4
+reports/assets/longcat_segment1_snap_*
