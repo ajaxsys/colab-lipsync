@@ -147,14 +147,18 @@ def patch_pipeline_module(pipeline_module_path: str):
     else:
         print("ℹ️ Note: _get_t5_prompt_embeds already patched or modified.")
 
-    # 3. Patch `_decode_video_latents`: reclaim GPU cache before VAE decoding to prevent VAE OOM
+    # 3. Patch `_decode_video_latents`: reclaim GPU cache before VAE decoding to prevent VAE OOM and guard against NaNs
     target_decode = "    def _decode_video_latents(self, latents):\n        cp_size = context_parallel_util.get_cp_size()"
-    replace_decode = "    def _decode_video_latents(self, latents):\n        if torch.cuda.is_available():\n            torch.cuda.empty_cache()\n        cp_size = context_parallel_util.get_cp_size()"
+    replace_decode = """    def _decode_video_latents(self, latents):
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        latents = torch.nan_to_num(latents, 0.0)
+        cp_size = context_parallel_util.get_cp_size()"""
 
     if target_decode in content:
         content = content.replace(target_decode, replace_decode)
-    else:
-        print("ℹ️ Note: _decode_video_latents already patched or modified.")
+    elif "latents = torch.nan_to_num(latents, 0.0)" not in content:
+        content = content.replace("cp_size = context_parallel_util.get_cp_size()", "latents = torch.nan_to_num(latents, 0.0)\n        cp_size = context_parallel_util.get_cp_size()")
 
     # 4. Patch denoising steps with nan_to_num protection against numerical instability
     target_step = "latents[:, :, 1:] = self.scheduler.step(noise_pred[:, :, 1:], t, latents[:, :, 1:], return_dict=False)[0]"
@@ -163,9 +167,51 @@ def patch_pipeline_module(pipeline_module_path: str):
     if target_step in content and "torch.nan_to_num" not in content:
         content = content.replace(target_step, replace_step)
 
+    # 5. Patch generate_avc denoising steps with nan_to_num protection to prevent black frames in video continuation
+    target_avc_step = """                if use_kv_cache:
+                    latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                else:
+                    latents[:, :, num_cond_latents:] = self.scheduler.step(noise_pred[:, :, num_cond_latents:], t, latents[:, :, num_cond_latents:], return_dict=False)[0]"""
+
+    replace_avc_step = """                noise_pred = torch.nan_to_num(noise_pred, 0.0)
+                if use_kv_cache:
+                    latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
+                else:
+                    latents[:, :, num_cond_latents:] = self.scheduler.step(noise_pred[:, :, num_cond_latents:], t, latents[:, :, num_cond_latents:], return_dict=False)[0]
+                latents = torch.nan_to_num(latents, 0.0)"""
+
+    if target_avc_step in content:
+        content = content.replace(target_avc_step, replace_avc_step)
+
+    # 6. Dynamic VAE CPU offload during diffusion loop in generate_ai2v and generate_avc
+    target_ai2v_diff = "        with tqdm(total=len(timesteps), desc=\"Denoising\") as progress_bar:"
+    replace_ai2v_diff = """        # Dynamic VAE CPU offload during diffusion to free ~800MB VRAM
+        if hasattr(self, "vae") and self.vae is not None:
+            self.vae = self.vae.to("cpu")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        with tqdm(total=len(timesteps), desc="Denoising") as progress_bar:"""
+
+    if target_ai2v_diff in content and "Dynamic VAE CPU offload" not in content:
+        content = content.replace(target_ai2v_diff, replace_ai2v_diff)
+
+    target_decode_vae = "        latents = latents.to(self.vae.dtype)\n        latents = self.denormalize_latents(latents)"
+    replace_decode_vae = """        # Bring VAE back to target device for video decoding
+        if hasattr(self, "vae") and self.vae is not None:
+            self.vae = self.vae.to(device)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        latents = torch.nan_to_num(latents, 0.0)
+        latents = latents.to(self.vae.dtype)
+        latents = self.denormalize_latents(latents)"""
+
+    if target_decode_vae in content:
+        content = content.replace(target_decode_vae, replace_decode_vae)
+
     with open(pipeline_module_path, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"✅ Successfully patched {pipeline_module_path} (CPU Text Encoder Offload)")
+    print(f"✅ Successfully patched {pipeline_module_path} (CPU Text Encoder Offload & VAE Lifecycle)")
 
 
 def patch_runner_script(runner_path: str):
@@ -242,9 +288,37 @@ def patch_runner_script(runner_path: str):
     if target_seg_gc in content and "torch.cuda.empty_cache()" not in content[content.find("del output"):content.find("del output")+100]:
         content = content.replace(target_seg_gc, replace_seg_gc)
 
+    # Reclaim GPU memory before each continuation segment
+    target_loop = "    for segment_idx in range(1, num_segments):\n        if local_rank == 0:\n            print(f\"Generating segment {segment_idx+1}/{num_segments}...\")"
+    replace_loop = """    for segment_idx in range(1, num_segments):
+        import gc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if local_rank == 0:
+            print(f"Generating segment {segment_idx+1}/{num_segments}...")"""
+
+    if target_loop in content:
+        content = content.replace(target_loop, replace_loop)
+
+    # Breakpoint state saving after segment 1 and each continuation segment
+    target_save_seg = "            save_video_ffmpeg(output_tensor, os.path.join(output_dir, f\"video_continue_{segment_idx+1}\"), raw_speech_path, fps=save_fps, quality=10)\n            del output_tensor"
+    replace_save_seg = """            save_video_ffmpeg(output_tensor, os.path.join(output_dir, f"video_continue_{segment_idx+1}"), raw_speech_path, fps=save_fps, quality=10)
+            del output_tensor
+            ckpt_file = os.path.join(output_dir, "resume_state.pt")
+            torch.save({
+                "segment_idx": segment_idx + 1,
+                "latent": latent.cpu(),
+                "all_generated_frames": all_generated_frames[:generated_frame_count],
+                "generated_frame_count": generated_frame_count,
+            }, ckpt_file)"""
+
+    if target_save_seg in content:
+        content = content.replace(target_save_seg, replace_save_seg)
+
     with open(runner_path, "w", encoding="utf-8") as f:
         f.write(content)
-    print(f"✅ Successfully patched {runner_path} (CPU Vocal Separator & Whisper Offload)")
+    print(f"✅ Successfully patched {runner_path} (CPU Vocal Separator & Whisper Offload & Checkpointing)")
 
 
 def patch_dit_avatar_module(dit_module_path: str):
@@ -765,6 +839,8 @@ def patch_blocks_module(blocks_path: str):
     Patches FeedForwardSwiGLU.forward in longcat_video/modules/blocks.py
     to execute in-place SwiGLU (F.silu(w1_out, inplace=True); w1_out.mul_(w3_out)),
     cutting peak activation memory from 3.15GB to 1.57GB (net savings ~1.57GB VRAM).
+    Also patches modulate_fp32 to execute in-place fp32 mul/add with NaN protection,
+    saving ~1.2GB peak VRAM per DiT block and completely eliminating numerical instability.
     """
     if not os.path.exists(blocks_path):
         raise FileNotFoundError(f"File not found: {blocks_path}")
@@ -785,11 +861,38 @@ def patch_blocks_module(blocks_path: str):
 
     if target in content:
         content = content.replace(target, replace)
-        with open(blocks_path, "w", encoding="utf-8") as f:
-            f.write(content)
         print(f"✅ Successfully patched {blocks_path} (In-Place SwiGLU, saves ~1.57GB VRAM)")
     else:
         print("ℹ️ Note: FeedForwardSwiGLU.forward already patched or modified.")
+
+    target_mod = """def modulate_fp32(norm_func, x, shift, scale):
+    # Suppose x is (B, N, D), shift is (B, -1, D), scale is (B, -1, D)
+    # ensure the modulation params be fp32
+    assert shift.dtype == torch.float32, scale.dtype == torch.float32
+    dtype = x.dtype
+    x = norm_func(x.to(torch.float32))
+    x = x * (scale + 1) + shift
+    x = x.to(dtype)
+    return x"""
+
+    replace_mod = """def modulate_fp32(norm_func, x, shift, scale):
+    assert shift.dtype == torch.float32, scale.dtype == torch.float32
+    dtype = x.dtype
+    # In-place fp32 modulation with NaN protection to eliminate 1.2GB allocation spike per block
+    x_fp32 = norm_func(x.to(torch.float32))
+    x_fp32 = torch.nan_to_num(x_fp32, 0.0)
+    x_fp32.mul_(scale + 1.0).add_(shift)
+    x_fp32 = torch.nan_to_num(x_fp32, 0.0)
+    return x_fp32.to(dtype)"""
+
+    if target_mod in content:
+        content = content.replace(target_mod, replace_mod)
+        print(f"✅ Successfully patched {blocks_path} (In-Place modulate_fp32 with NaN protection)")
+    else:
+        print("ℹ️ Note: modulate_fp32 already patched or modified.")
+
+    with open(blocks_path, "w", encoding="utf-8") as f:
+        f.write(content)
 
 
 def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
