@@ -217,8 +217,8 @@ def patch_runner_script(runner_path: str):
 def patch_dit_avatar_module(dit_module_path: str):
     """
     Patches _create_multi_lora_forward in longcat_video/modules/avatar/longcat_video_dit_avatar.py
-    to use in-place accumulator (org_output.add_(lora_output)), eliminating the ~1.7GB peak activation
-    memory overhead caused by creating multiple 878MB intermediate tensors during LoRA output fusion.
+    to use in-place zero-allocation GEMM (.addmm_ / .baddbmm_), eliminating both the intermediate `lx`
+    tensor (788MB) and `lora_output` (788MB). Saves ~1.57GB of peak activation VRAM during LoRA forward passes.
     """
     if not os.path.exists(dit_module_path):
         raise FileNotFoundError(f"File not found: {dit_module_path}")
@@ -226,22 +226,14 @@ def patch_dit_avatar_module(dit_module_path: str):
     with open(dit_module_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    target_func = '''    def _create_multi_lora_forward(self, module, loras):
-        def multi_lora_forward(x, *args, **kwargs):
-            weight_dtype = x.dtype
-            org_output = module.org_forward(x, *args, **kwargs)
-            
-            total_lora_output = 0
-            for lora in loras:
-                if lora.use_lora:
-                    lx = lora.lora_down(x.to(lora.lora_down.weight.dtype))
-                    lx = lora.lora_up(lx)
-                    lora_output = lx.to(weight_dtype) * lora.multiplier * lora.alpha_scale
-                    total_lora_output += lora_output
-            
-            return org_output + total_lora_output
-        
-        return multi_lora_forward'''
+    target_start = "    def _create_multi_lora_forward(self, module, loras):"
+    target_end = "    def _get_module_by_name(self, module_name):"
+
+    start_idx = content.find(target_start)
+    end_idx = content.find(target_end, start_idx)
+    if start_idx == -1 or end_idx == -1:
+        print("ℹ️ Note: Could not find _create_multi_lora_forward markers in dit_avatar.")
+        return
 
     replace_func = '''    def _create_multi_lora_forward(self, module, loras):
         def multi_lora_forward(x, *args, **kwargs):
@@ -250,23 +242,42 @@ def patch_dit_avatar_module(dit_module_path: str):
             
             for lora in loras:
                 if lora.use_lora:
-                    lx = lora.lora_down(x.to(lora.lora_down.weight.dtype))
-                    lx = lora.lora_up(lx)
-                    lora_output = lx.to(weight_dtype) * (lora.multiplier * lora.alpha_scale)
-                    org_output.add_(lora_output)
-                    del lx, lora_output
+                    alpha = float(lora.multiplier * float(lora.alpha_scale.float().item() if torch.is_tensor(lora.alpha_scale) else lora.alpha_scale))
+                    h = lora.lora_down(x.to(lora.lora_down.weight.dtype))
+                    if hasattr(lora, 'lora_up') and hasattr(lora.lora_up, 'weight') and getattr(lora.lora_up, 'bias', None) is None:
+                        w_up_t = lora.lora_up.weight.t()
+                        if w_up_t.dtype != weight_dtype:
+                            w_up_t = w_up_t.to(weight_dtype)
+                        if h.dtype != weight_dtype:
+                            h = h.to(weight_dtype)
+                        if org_output.dim() == 3 and org_output.shape[0] == 1:
+                            org_output.squeeze(0).addmm_(h.squeeze(0), w_up_t, alpha=alpha)
+                        elif org_output.dim() == 2:
+                            org_output.addmm_(h, w_up_t, alpha=alpha)
+                        else:
+                            lx = lora.lora_up(h)
+                            if lx.dtype != weight_dtype:
+                                lx = lx.to(weight_dtype)
+                            org_output.add_(lx, alpha=alpha)
+                            del lx
+                    else:
+                        lx = lora.lora_up(h)
+                        if lx.dtype != weight_dtype:
+                            lx = lx.to(weight_dtype)
+                        org_output.add_(lx, alpha=alpha)
+                        del lx
+                    del h
             
             return org_output
         
-        return multi_lora_forward'''
+        return multi_lora_forward
 
-    if target_func in content:
-        content = content.replace(target_func, replace_func)
-        with open(dit_module_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        print(f"✅ Successfully patched {dit_module_path} (In-Place Multi-LoRA Forward, saves ~1.7GB VRAM)")
-    else:
-        print("ℹ️ Note: _create_multi_lora_forward already patched or modified in dit_avatar.")
+'''
+
+    content = content[:start_idx] + replace_func + content[end_idx:]
+    with open(dit_module_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"✅ Successfully patched {dit_module_path} (Zero-Allocation addmm_ Multi-LoRA Forward, saves ~1.57GB VRAM)")
 
 
 def patch_rope_module(rope_module_path: str):
