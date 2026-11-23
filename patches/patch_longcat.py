@@ -403,12 +403,105 @@ def patch_rope_module(rope_module_path: str):
     print(f"✅ Successfully patched {rope_module_path} (Zero-Copy In-Place BF16 3D RoPE, saves ~870MB VRAM)")
 
 
+def patch_attention_module(attention_module_path: str):
+    """
+    Patches attention.py to support PyTorch native scaled_dot_product_attention (SDPA)
+    when external flash_attn or xformers packages are not installed in the environment.
+    """
+    if not os.path.exists(attention_module_path):
+        raise FileNotFoundError(f"File not found: {attention_module_path}")
+
+    with open(attention_module_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # 1. Patch self-attention in _process_attn
+    target_attn = '''        elif self.enable_flashattn2:
+            from flash_attn import flash_attn_func
+            q = rearrange(q, "B H S D -> B S H D")
+            k = rearrange(k, "B H S D -> B S H D")
+            v = rearrange(v, "B H S D -> B S H D")
+            x = flash_attn_func(
+                q,
+                k,
+                v,
+                dropout_p=0.0,
+                softmax_scale=self.scale,
+            )
+            x = rearrange(x, "B S H D -> B H S D")'''
+
+    replace_attn = '''        elif self.enable_flashattn2:
+            try:
+                from flash_attn import flash_attn_func
+                q = rearrange(q, "B H S D -> B S H D")
+                k = rearrange(k, "B H S D -> B S H D")
+                v = rearrange(v, "B H S D -> B S H D")
+                x = flash_attn_func(
+                    q,
+                    k,
+                    v,
+                    dropout_p=0.0,
+                    softmax_scale=self.scale,
+                )
+                x = rearrange(x, "B S H D -> B H S D")
+            except ImportError:
+                import torch.nn.functional as F
+                x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)'''
+
+    if target_attn in content:
+        content = content.replace(target_attn, replace_attn)
+    else:
+        print("ℹ️ Note: _process_attn already patched or modified.")
+
+    # 2. Patch cross-attention in _process_cross_attn
+    target_cross = '''        elif self.enable_flashattn2:
+            from flash_attn import flash_attn_func
+            q = rearrange(q, "B H S D -> B S H D")
+            encoder_k = rearrange(encoder_k, "B H S D -> B S H D")
+            encoder_v = rearrange(encoder_v, "B H S D -> B S H D")
+            x = flash_attn_func(
+                q,
+                encoder_k,
+                encoder_v,
+                dropout_p=0.0,
+                softmax_scale=self.scale,
+            )
+            x = rearrange(x, "B S H D -> B H S D")'''
+
+    replace_cross = '''        elif self.enable_flashattn2:
+            try:
+                from flash_attn import flash_attn_func
+                q = rearrange(q, "B H S D -> B S H D")
+                encoder_k = rearrange(encoder_k, "B H S D -> B S H D")
+                encoder_v = rearrange(encoder_v, "B H S D -> B S H D")
+                x = flash_attn_func(
+                    q,
+                    encoder_k,
+                    encoder_v,
+                    dropout_p=0.0,
+                    softmax_scale=self.scale,
+                )
+                x = rearrange(x, "B S H D -> B H S D")
+            except ImportError:
+                import torch.nn.functional as F
+                x = F.scaled_dot_product_attention(q, encoder_k, encoder_v, scale=self.scale)'''
+
+    if target_cross in content:
+        content = content.replace(target_cross, replace_cross)
+    else:
+        print("ℹ️ Note: _process_cross_attn already patched or modified.")
+
+    with open(attention_module_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"✅ Successfully patched {attention_module_path} (Native PyTorch SDPA FlashAttention fallback)")
+
+
 def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
     quant_path = os.path.join(repo_dir, "longcat_video", "modules", "quantization.py")
     pipe_path = os.path.join(repo_dir, "longcat_video", "pipeline_longcat_video_avatar.py")
     runner_path = os.path.join(repo_dir, "run_demo_avatar_single_audio_to_video.py")
     dit_avatar_path = os.path.join(repo_dir, "longcat_video", "modules", "avatar", "longcat_video_dit_avatar.py")
     rope_path = os.path.join(repo_dir, "longcat_video", "modules", "avatar", "rope_3d.py")
+    attn_path = os.path.join(repo_dir, "longcat_video", "modules", "avatar", "attention.py")
 
     if os.path.exists(quant_path):
         patch_quantization_module(quant_path)
@@ -420,6 +513,8 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
         patch_dit_avatar_module(dit_avatar_path)
     if os.path.exists(rope_path):
         patch_rope_module(rope_path)
+    if os.path.exists(attn_path):
+        patch_attention_module(attn_path)
 
 
 if __name__ == "__main__":
