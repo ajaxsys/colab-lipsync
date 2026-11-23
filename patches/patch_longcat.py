@@ -208,11 +208,6 @@ def patch_runner_script(runner_path: str):
 
     if target_audio_offload in content and "del pipe.audio_encoder" not in content:
         content = content.replace(target_audio_offload, replace_audio_offload)
-    elif 'pipe.audio_encoder = pipe.audio_encoder.to("cpu")' in content:
-        content = content.replace(
-            'pipe.audio_encoder = pipe.audio_encoder.to("cpu")',
-            'try:\n        del audio_encoder\n    except Exception:\n        pass\n    del pipe.audio_encoder\n    import gc; gc.collect()'
-        )
 
     with open(runner_path, "w", encoding="utf-8") as f:
         f.write(content)
