@@ -147,6 +147,20 @@ def patch_pipeline_module(pipeline_module_path: str):
     else:
         print("ℹ️ Note: _get_t5_prompt_embeds already patched or modified.")
 
+    # 3. Patch `_decode_video_latents`: reclaim GPU cache before VAE decoding to prevent VAE OOM
+    target_decode = "    def _decode_video_latents(self, latents):\n        cp_size = context_parallel_util.get_cp_size()"
+    replace_decode = "    def _decode_video_latents(self, latents):\n        if torch.cuda.is_available():\n            torch.cuda.empty_cache()\n        cp_size = context_parallel_util.get_cp_size()"
+
+    if target_decode in content and "empty_cache()" not in content:
+        content = content.replace(target_decode, replace_decode)
+
+    # 4. Patch denoising steps with nan_to_num protection against numerical instability
+    target_step = "latents[:, :, 1:] = self.scheduler.step(noise_pred[:, :, 1:], t, latents[:, :, 1:], return_dict=False)[0]"
+    replace_step = "latents[:, :, 1:] = self.scheduler.step(torch.nan_to_num(noise_pred[:, :, 1:], 0.0), t, latents[:, :, 1:], return_dict=False)[0]\n                latents = torch.nan_to_num(latents, 0.0)"
+
+    if target_step in content and "torch.nan_to_num" not in content:
+        content = content.replace(target_step, replace_step)
+
     with open(pipeline_module_path, "w", encoding="utf-8") as f:
         f.write(content)
     print(f"✅ Successfully patched {pipeline_module_path} (CPU Text Encoder Offload)")
@@ -416,8 +430,11 @@ def patch_rope_module(rope_module_path: str):
 
 def patch_attention_module(attention_module_path: str):
     """
-    Patches attention.py to support PyTorch native scaled_dot_product_attention (SDPA)
-    when external flash_attn or xformers packages are not installed in the environment.
+    Patches longcat_video/modules/avatar/attention.py to support PyTorch native
+    scaled_dot_product_attention (SDPA) when flash_attn is not installed.
+    Crucial fix: Avoid transposing (B, H, S, D) -> (B, S, H, D) before SDPA,
+    which previously caused tokens to attend across heads instead of sequence tokens,
+    leading to numerical divergence, NaNs, and pitch-black generated frames.
     """
     if not os.path.exists(attention_module_path):
         raise FileNotFoundError(f"File not found: {attention_module_path}")
@@ -426,7 +443,25 @@ def patch_attention_module(attention_module_path: str):
         content = f.read()
 
     # 1. Patch self-attention in _process_attn
-    target_attn = '''        elif self.enable_flashattn2:
+    replace_attn = '''        elif self.enable_flashattn2:
+            try:
+                from flash_attn import flash_attn_func
+                q_fa = rearrange(q, "B H S D -> B S H D")
+                k_fa = rearrange(k, "B H S D -> B S H D")
+                v_fa = rearrange(v, "B H S D -> B S H D")
+                x = flash_attn_func(
+                    q_fa,
+                    k_fa,
+                    v_fa,
+                    dropout_p=0.0,
+                    softmax_scale=self.scale,
+                )
+                x = rearrange(x, "B S H D -> B H S D")
+            except ImportError:
+                import torch.nn.functional as F
+                x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)'''
+
+    target_attn_orig = '''        elif self.enable_flashattn2:
             from flash_attn import flash_attn_func
             q = rearrange(q, "B H S D -> B S H D")
             k = rearrange(k, "B H S D -> B S H D")
@@ -440,7 +475,7 @@ def patch_attention_module(attention_module_path: str):
             )
             x = rearrange(x, "B S H D -> B H S D")'''
 
-    replace_attn = '''        elif self.enable_flashattn2:
+    target_attn_old_patch = '''        elif self.enable_flashattn2:
             try:
                 from flash_attn import flash_attn_func
                 q = rearrange(q, "B H S D -> B S H D")
@@ -458,13 +493,33 @@ def patch_attention_module(attention_module_path: str):
                 import torch.nn.functional as F
                 x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)'''
 
-    if target_attn in content:
-        content = content.replace(target_attn, replace_attn)
+    if target_attn_orig in content:
+        content = content.replace(target_attn_orig, replace_attn)
+    elif target_attn_old_patch in content:
+        content = content.replace(target_attn_old_patch, replace_attn)
     else:
-        print("ℹ️ Note: _process_attn already patched or modified.")
+        print("ℹ️ Note: avatar _process_attn already patched or modified.")
 
     # 2. Patch cross-attention in _process_cross_attn
-    target_cross = '''        elif self.enable_flashattn2:
+    replace_cross = '''        elif self.enable_flashattn2:
+            try:
+                from flash_attn import flash_attn_func
+                q_fa = rearrange(q, "B H S D -> B S H D")
+                encoder_k_fa = rearrange(encoder_k, "B H S D -> B S H D")
+                encoder_v_fa = rearrange(encoder_v, "B H S D -> B S H D")
+                x = flash_attn_func(
+                    q_fa,
+                    encoder_k_fa,
+                    encoder_v_fa,
+                    dropout_p=0.0,
+                    softmax_scale=self.scale,
+                )
+                x = rearrange(x, "B S H D -> B H S D")
+            except ImportError:
+                import torch.nn.functional as F
+                x = F.scaled_dot_product_attention(q, encoder_k, encoder_v, scale=self.scale)'''
+
+    target_cross_orig = '''        elif self.enable_flashattn2:
             from flash_attn import flash_attn_func
             q = rearrange(q, "B H S D -> B S H D")
             encoder_k = rearrange(encoder_k, "B H S D -> B S H D")
@@ -478,7 +533,7 @@ def patch_attention_module(attention_module_path: str):
             )
             x = rearrange(x, "B S H D -> B H S D")'''
 
-    replace_cross = '''        elif self.enable_flashattn2:
+    target_cross_old_patch = '''        elif self.enable_flashattn2:
             try:
                 from flash_attn import flash_attn_func
                 q = rearrange(q, "B H S D -> B S H D")
@@ -496,10 +551,12 @@ def patch_attention_module(attention_module_path: str):
                 import torch.nn.functional as F
                 x = F.scaled_dot_product_attention(q, encoder_k, encoder_v, scale=self.scale)'''
 
-    if target_cross in content:
-        content = content.replace(target_cross, replace_cross)
+    if target_cross_orig in content:
+        content = content.replace(target_cross_orig, replace_cross)
+    elif target_cross_old_patch in content:
+        content = content.replace(target_cross_old_patch, replace_cross)
     else:
-        print("ℹ️ Note: _process_cross_attn already patched or modified.")
+        print("ℹ️ Note: avatar _process_cross_attn already patched or modified.")
 
     with open(attention_module_path, "w", encoding="utf-8") as f:
         f.write(content)
@@ -518,7 +575,25 @@ def patch_base_attention_module(attention_module_path: str):
         content = f.read()
 
     # 1. Patch self-attention in _process_attn
-    target_attn = '''        elif self.enable_flashattn2:
+    replace_attn = '''        elif self.enable_flashattn2:
+            try:
+                from flash_attn import flash_attn_func
+                q_fa = rearrange(q, "B H S D -> B S H D")
+                k_fa = rearrange(k, "B H S D -> B S H D")
+                v_fa = rearrange(v, "B H S D -> B S H D")
+                x = flash_attn_func(
+                    q_fa,
+                    k_fa,
+                    v_fa,
+                    dropout_p=0.0,
+                    softmax_scale=getattr(self, 'scale', self.head_dim ** -0.5),
+                )
+                x = rearrange(x, "B S H D -> B H S D")
+            except ImportError:
+                import torch.nn.functional as F
+                x = F.scaled_dot_product_attention(q, k, v, scale=getattr(self, 'scale', self.head_dim ** -0.5))'''
+
+    target_attn_orig = '''        elif self.enable_flashattn2:
             from flash_attn import flash_attn_func
             q = rearrange(q, "B H S D -> B S H D")
             k = rearrange(k, "B H S D -> B S H D")
@@ -532,7 +607,7 @@ def patch_base_attention_module(attention_module_path: str):
             )
             x = rearrange(x, "B S H D -> B H S D")'''
 
-    replace_attn = '''        elif self.enable_flashattn2:
+    target_attn_old_patch = '''        elif self.enable_flashattn2:
             try:
                 from flash_attn import flash_attn_func
                 q = rearrange(q, "B H S D -> B S H D")
@@ -550,8 +625,30 @@ def patch_base_attention_module(attention_module_path: str):
                 import torch.nn.functional as F
                 x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)'''
 
-    if target_attn in content:
-        content = content.replace(target_attn, replace_attn)
+    target_attn_old_patch2 = '''        elif self.enable_flashattn2:
+            try:
+                from flash_attn import flash_attn_func
+                q = rearrange(q, "B H S D -> B S H D")
+                k = rearrange(k, "B H S D -> B S H D")
+                v = rearrange(v, "B H S D -> B S H D")
+                x = flash_attn_func(
+                    q,
+                    k,
+                    v,
+                    dropout_p=0.0,
+                    softmax_scale=getattr(self, 'scale', self.head_dim ** -0.5),
+                )
+                x = rearrange(x, "B S H D -> B H S D")
+            except ImportError:
+                import torch.nn.functional as F
+                x = F.scaled_dot_product_attention(q, k, v, scale=getattr(self, 'scale', self.head_dim ** -0.5))'''
+
+    if target_attn_orig in content:
+        content = content.replace(target_attn_orig, replace_attn)
+    elif target_attn_old_patch2 in content:
+        content = content.replace(target_attn_old_patch2, replace_attn)
+    elif target_attn_old_patch in content:
+        content = content.replace(target_attn_old_patch, replace_attn)
     else:
         print("ℹ️ Note: base _process_attn already patched or modified.")
 
@@ -619,6 +716,31 @@ def patch_base_attention_module(attention_module_path: str):
     print(f"✅ Successfully patched {attention_module_path} (Base DiT SDPA Attention fallback)")
 
 
+def patch_vae_module(vae_module_path: str):
+    """
+    Patches WanUpsample.forward in autoencoder_kl_wan.py:
+    Replaces `return super().forward(x.float()).type_as(x)` with `return super().forward(x)`.
+    PyTorch 2.x nn.Upsample natively supports bfloat16, eliminating a 294MB FP32 allocation spike
+    that otherwise triggers CUDA OOM on 24GB GPUs during video decoding.
+    """
+    if not os.path.exists(vae_module_path):
+        raise FileNotFoundError(f"File not found: {vae_module_path}")
+
+    with open(vae_module_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    target = "    def forward(self, x):\n        return super().forward(x.float()).type_as(x)"
+    replace = "    def forward(self, x):\n        # Native bfloat16 upsample without FP32 allocation spike\n        return super().forward(x)"
+
+    if target in content:
+        content = content.replace(target, replace)
+        with open(vae_module_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"✅ Successfully patched {vae_module_path} (Native BF16 VAE Upsample)")
+    else:
+        print("ℹ️ Note: WanUpsample.forward already patched or modified.")
+
+
 def patch_blocks_module(blocks_path: str):
     """
     Patches FeedForwardSwiGLU.forward in longcat_video/modules/blocks.py
@@ -660,6 +782,7 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
     attn_path = os.path.join(repo_dir, "longcat_video", "modules", "avatar", "attention.py")
     base_attn_path = os.path.join(repo_dir, "longcat_video", "modules", "attention.py")
     blocks_path = os.path.join(repo_dir, "longcat_video", "modules", "blocks.py")
+    vae_path = os.path.join(repo_dir, "longcat_video", "modules", "autoencoder_kl_wan.py")
 
     if os.path.exists(quant_path):
         patch_quantization_module(quant_path)
@@ -677,6 +800,8 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
         patch_base_attention_module(base_attn_path)
     if os.path.exists(blocks_path):
         patch_blocks_module(blocks_path)
+    if os.path.exists(vae_path):
+        patch_vae_module(vae_path)
 
 
 if __name__ == "__main__":
