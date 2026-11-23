@@ -214,10 +214,66 @@ def patch_runner_script(runner_path: str):
     print(f"✅ Successfully patched {runner_path} (CPU Vocal Separator & Whisper Offload)")
 
 
+def patch_dit_avatar_module(dit_module_path: str):
+    """
+    Patches _create_multi_lora_forward in longcat_video/modules/avatar/longcat_video_dit_avatar.py
+    to use in-place accumulator (org_output.add_(lora_output)), eliminating the ~1.7GB peak activation
+    memory overhead caused by creating multiple 878MB intermediate tensors during LoRA output fusion.
+    """
+    if not os.path.exists(dit_module_path):
+        raise FileNotFoundError(f"File not found: {dit_module_path}")
+
+    with open(dit_module_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    target_func = '''    def _create_multi_lora_forward(self, module, loras):
+        def multi_lora_forward(x, *args, **kwargs):
+            weight_dtype = x.dtype
+            org_output = module.org_forward(x, *args, **kwargs)
+            
+            total_lora_output = 0
+            for lora in loras:
+                if lora.use_lora:
+                    lx = lora.lora_down(x.to(lora.lora_down.weight.dtype))
+                    lx = lora.lora_up(lx)
+                    lora_output = lx.to(weight_dtype) * lora.multiplier * lora.alpha_scale
+                    total_lora_output += lora_output
+            
+            return org_output + total_lora_output
+        
+        return multi_lora_forward'''
+
+    replace_func = '''    def _create_multi_lora_forward(self, module, loras):
+        def multi_lora_forward(x, *args, **kwargs):
+            weight_dtype = x.dtype
+            org_output = module.org_forward(x, *args, **kwargs)
+            
+            for lora in loras:
+                if lora.use_lora:
+                    lx = lora.lora_down(x.to(lora.lora_down.weight.dtype))
+                    lx = lora.lora_up(lx)
+                    lora_output = lx.to(weight_dtype) * (lora.multiplier * lora.alpha_scale)
+                    org_output.add_(lora_output)
+                    del lx, lora_output
+            
+            return org_output
+        
+        return multi_lora_forward'''
+
+    if target_func in content:
+        content = content.replace(target_func, replace_func)
+        with open(dit_module_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"✅ Successfully patched {dit_module_path} (In-Place Multi-LoRA Forward, saves ~1.7GB VRAM)")
+    else:
+        print("ℹ️ Note: _create_multi_lora_forward already patched or modified in dit_avatar.")
+
+
 def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
     quant_path = os.path.join(repo_dir, "longcat_video", "modules", "quantization.py")
     pipe_path = os.path.join(repo_dir, "longcat_video", "pipeline_longcat_video_avatar.py")
     runner_path = os.path.join(repo_dir, "run_demo_avatar_single_audio_to_video.py")
+    dit_avatar_path = os.path.join(repo_dir, "longcat_video", "modules", "avatar", "longcat_video_dit_avatar.py")
 
     if os.path.exists(quant_path):
         patch_quantization_module(quant_path)
@@ -225,6 +281,8 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video"):
         patch_pipeline_module(pipe_path)
     if os.path.exists(runner_path):
         patch_runner_script(runner_path)
+    if os.path.exists(dit_avatar_path):
+        patch_dit_avatar_module(dit_avatar_path)
 
 
 if __name__ == "__main__":
