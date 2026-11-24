@@ -279,6 +279,13 @@ def patch_runner_script(runner_path: str):
     if target_del in content and "del vocal_separator" not in content:
         content = content.replace(target_del, replace_del)
 
+    # Support avatar-v1.6 model_type in model loading
+    content = content.replace('elif model_type == "avatar-v1.5":', 'elif model_type in ("avatar-v1.5", "avatar-v1.6"):')
+    content = content.replace("Expected 'avatar-v1.0' or 'avatar-v1.5'.", "Expected 'avatar-v1.0', 'avatar-v1.5', or 'avatar-v1.6'.")
+
+    # Enable offload_kv_cache=True to keep KV cache on CPU RAM, saving ~3GB GPU VRAM during AVC continuation
+    content = content.replace("offload_kv_cache=False,", "offload_kv_cache=True,")
+
     # Enable VAE tiling and slicing to cut VAE decode memory from 5.5GB to <700MB, preventing VAE OOM
     target_pipe_init = "    pipe.to(local_rank)"
     replace_pipe_init = """    pipe.to(local_rank)
