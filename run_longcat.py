@@ -92,7 +92,7 @@ def main():
         "--stage_1=ai2v",
         f"--input_json={job_json_path}",
         f"--output_dir={args.output_dir}",
-        "--model_type=avatar-v1.6",
+        "--model_type=avatar-v1.5",
         "--use_distill",
         "--lora_path=loraB/lora.safetensors",
         "--mix_steps=4",
