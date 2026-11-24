@@ -4,7 +4,7 @@ Orchestrator for LongCat Avatar v2.2 Full 30s Render on Colab A100.
 Handles:
 1. Resilient A100 session provisioning with retry backoff.
 2. Fast environment setup & weight downloading (BF16 native, loraB symlink).
-3. 10-segment (30.48s) inference execution with v2.2 parameters (pure OPSD, scale 0.42, vocal limiter).
+3. 10-segment (30.48s) inference execution with v2.2 parameters inside persistent tmux.
 4. Continuous monitoring & progress reporting.
 5. Result download to sample/output_longcat_avatar_30s_v22.mp4.
 6. Immediate shutdown of A100 to freeze compute unit costs.
@@ -57,7 +57,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo '=== 1. PACKAGES ==='
 apt-get update -qq
-apt-get install -y -qq ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavdevice-dev libavfilter-dev git git-lfs aria2 >/dev/null
+apt-get install -y -qq tmux ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libavdevice-dev libavfilter-dev git git-lfs aria2 >/dev/null
 
 pip install -q av==19.0.2 diffusers==0.35.1 huggingface_hub==0.36.2 torchvision==0.29.2 onnxruntime-gpu==1.32.0 audio-separator soundfile einops accelerate transformers==4.49.0 loguru ftfy imageio imageio-ffmpeg librosa pyloudnorm nvidia-ml-py soxr opencv-python-headless
 
@@ -78,7 +78,6 @@ echo '=== 4. VERIFY GPU ==='
 python3 -c "import torch; print('CUDA:', torch.cuda.is_available(), 'GPU:', torch.cuda.get_device_name(0), 'VRAM:', round(torch.cuda.get_device_properties(0).total_memory/1024**3, 1), 'GB')"
 echo '=== SETUP COMPLETED ==='
 """
-    # Send script to remote
     with open("/tmp/remote_setup.sh", "w") as f:
         f.write(remote_setup_sh)
     run(f"colab upload -s {SESSION} /tmp/remote_setup.sh /content/remote_setup.sh")
@@ -131,20 +130,14 @@ print(f'🎉 Weights downloaded in {elapsed}s')
     run(f"colab ssh -s {SESSION} -- 'python3 /content/download_weights.py'", capture=False)
 
 def start_inference():
-    print("\n🎬 Launching full 30.48s (10 segments) inference...")
+    print("\n🎬 Launching full 30.48s (10 segments) inference inside detached tmux...")
     launch_sh = r"""
 mkdir -p /content/output_longcat_30s_v22
-nohup python3 /content/colab-lipsync/run_longcat.py \
-  --target_gpu=A100 \
-  --resolution=480p \
-  --num_segments=10 \
-  --audio_guidance_scale=0.42 \
-  --mix_steps=4 \
-  --mix_alpha=0.0 \
-  --output_dir=/content/output_longcat_30s_v22 > /content/run_longcat_30s.log 2>&1 &
-sleep 5
-ps aux | grep -E 'run_longcat|torchrun' | grep -v grep
-echo '--- INFERENCE LAUNCHED ---'
+tmux kill-session -t inf 2>/dev/null || true
+tmux new-session -d -s inf "cd /content/LongCat-Video && python3 -u /content/colab-lipsync/run_longcat.py --target_gpu=A100 --resolution=480p --num_segments=10 --audio_guidance_scale=0.42 --mix_steps=4 --mix_alpha=0.0 --output_dir=/content/output_longcat_30s_v22 2>&1 | tee /content/run_longcat_30s.log"
+sleep 3
+tmux list-sessions
+echo '--- INFERENCE LAUNCHED IN TMUX ---'
 """
     with open("/tmp/launch_inference.sh", "w") as f:
         f.write(launch_sh)
@@ -157,15 +150,15 @@ def monitor_and_download():
     last_log = ""
     while True:
         time.sleep(45)
-        # Check process status
-        ps_res = run(f"colab ssh -s {SESSION} -- \"ps aux | grep -E 'run_longcat|torchrun' | grep -v grep\"", check=False)
-        is_running = (ps_res.returncode == 0 and len(ps_res.stdout.strip()) > 0)
+        # Check tmux session status
+        tmux_res = run(f"colab ssh -s {SESSION} -- 'tmux has-session -t inf 2>/dev/null'", check=False)
+        is_running = (tmux_res.returncode == 0)
 
         # Check log tail
         log_res = run(f"colab ssh -s {SESSION} -- \"tail -n 25 /content/run_longcat_30s.log | tr '\\r' '\\n' | tail -n 15\"", check=False)
         curr_log = log_res.stdout.strip()
         elapsed = int(time.time() - start_time)
-        print(f"[{elapsed//60}m {elapsed%60}s] Running: {is_running}")
+        print(f"[{elapsed//60}m {elapsed%60}s] TMUX running: {is_running}")
         if curr_log and curr_log != last_log:
             print(f"--- LOG ---\n{curr_log}\n-----------")
             last_log = curr_log
@@ -177,16 +170,16 @@ def monitor_and_download():
             break
 
         if not is_running:
-            # If not running and video not found, check if it failed or finished under different name
+            # If tmux ended, check if final video was generated
             full_check = run(f"colab ssh -s {SESSION} -- \"ls -lh /content/output_longcat_30s_v22/\"", check=False)
             print(f"Files in output dir:\n{full_check.stdout}")
-            if "video_continue" in full_check.stdout:
-                print("Inference finished!")
+            if "video_continue_10.mp4" in full_check.stdout:
+                print("Inference finished successfully!")
                 break
             else:
-                print("⚠️ Process died unexpectedly. Printing last 50 lines of log:")
-                tail_res = run(f"colab ssh -s {SESSION} -- \"tail -n 50 /content/run_longcat_30s.log\"", check=False)
-                print(tail_res.stdout)
+                print("⚠️ TMUX session finished without final video. Full log dump:")
+                dump_res = run(f"colab ssh -s {SESSION} -- \"cat /content/run_longcat_30s.log | tail -n 120\"", check=False)
+                print(dump_res.stdout)
                 raise RuntimeError("Inference terminated without producing final video.")
 
     print("\n📥 Downloading final video to local workspace...")

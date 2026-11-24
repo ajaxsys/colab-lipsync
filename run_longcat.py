@@ -84,7 +84,9 @@ def main():
 
     # 3. Launch torchrun with PyTorch memory fragmentation configuration
     env_vars = {
-        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        "PYTHONUNBUFFERED": "1",
+        "TORCH_DISTRIBUTED_DEBUG": "DETAIL",
     }
 
     cmd = [
