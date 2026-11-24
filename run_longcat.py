@@ -43,7 +43,7 @@ def main():
     parser.add_argument("--num_inference_steps", type=int, default=8, help="Distilled inference steps (default: 8)")
     parser.add_argument("--text_guidance_scale", type=float, default=1.0, help="Text guidance scale (default: 1.0 for distilled)")
     parser.add_argument("--audio_guidance_scale", type=float, default=0.42, help="Audio guidance scale (tuned down to 0.42 for gentle, natural lip movements)")
-    parser.add_argument("--mix_steps", type=int, default=0, help="Distill LoRA mixing steps (0 to bypass DMD and solely use smooth OPSD loraB)")
+    parser.add_argument("--mix_steps", type=int, default=4, help="Distill LoRA mixing steps (4 with mix_alpha=0.0 bypasses DMD and solely uses smooth OPSD loraB)")
     parser.add_argument("--mix_alpha", type=float, default=0.0, help="Distill LoRA mixing alpha (0.0 for pure OPSD)")
     parser.add_argument("--use_int8", action="store_true", help="Enable INT8 quantization (only needed on 24GB GPUs; disable on A100/H100)")
     parser.add_argument("--target_gpu", default="A100", choices=["A100", "L4", "4090"], help="Target GPU architecture (default: A100)")
