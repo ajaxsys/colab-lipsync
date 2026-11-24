@@ -209,6 +209,21 @@ def patch_pipeline_module(pipeline_module_path: str):
     if target_decode_vae in content:
         content = content.replace(target_decode_vae, replace_decode_vae)
 
+    # 7. Patch generate_avc to delete unneeded raw video tensor and reclaim ~250MB VRAM before denoising
+    target_avc_prep = """        cond_videos = video[:, :, -num_cond_frames:]
+        cond_videos_latents = retrieve_latents(self.vae.encode(cond_videos), generator, sample_mode="argmax")
+        cond_videos_latents = self.normalize_latents(cond_videos_latents)"""
+    replace_avc_prep = """        cond_videos = video[:, :, -num_cond_frames:]
+        cond_videos_latents = retrieve_latents(self.vae.encode(cond_videos), generator, sample_mode="argmax")
+        cond_videos_latents = self.normalize_latents(cond_videos_latents)
+        del video
+        del cond_videos
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()"""
+
+    if target_avc_prep in content and "del cond_videos" not in content:
+        content = content.replace(target_avc_prep, replace_avc_prep)
+
     with open(pipeline_module_path, "w", encoding="utf-8") as f:
         f.write(content)
     print(f"✅ Successfully patched {pipeline_module_path} (CPU Text Encoder Offload & VAE Lifecycle)")
@@ -905,6 +920,52 @@ def patch_blocks_module(blocks_path: str):
         print(f"✅ Successfully patched {blocks_path} (In-Place modulate_fp32 with NaN protection)")
     else:
         print("ℹ️ Note: modulate_fp32 already patched or modified.")
+
+    # 3. Patch RMSNorm to use PyTorch native fused F.rms_norm, eliminating 488MB FP32 allocation spikes
+    target_rmsnorm = """    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight"""
+
+    replace_rmsnorm = """    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        if hasattr(F, "rms_norm"):
+            return F.rms_norm(x, (x.shape[-1],), weight=self.weight.to(x.dtype), eps=self.eps)
+        variance = x.pow(2).mean(-1, keepdim=True)
+        return x * torch.rsqrt(variance + self.eps) * self.weight.to(x.dtype)"""
+
+    if target_rmsnorm in content:
+        content = content.replace(target_rmsnorm, replace_rmsnorm)
+        print(f"✅ Successfully patched {blocks_path} (Fused F.rms_norm, saves ~1GB VRAM per block)")
+    else:
+        print("ℹ️ Note: RMSNorm already patched or modified.")
+
+    # 4. Patch LayerNorm_FP32 to avoid intermediate FP32 allocation spike on BF16
+    target_ln = """        out = F.layer_norm(
+            inputs.float(), 
+            self.normalized_shape, 
+            None if self.weight is None else self.weight.float(), 
+            None if self.bias is None else self.bias.float() ,
+            self.eps
+        ).to(origin_dtype)"""
+
+    replace_ln = """        out = F.layer_norm(
+            inputs, 
+            self.normalized_shape, 
+            self.weight.to(origin_dtype) if self.weight is not None else None, 
+            self.bias.to(origin_dtype) if self.bias is not None else None,
+            self.eps
+        )"""
+
+    if target_ln in content:
+        content = content.replace(target_ln, replace_ln)
+        print(f"✅ Successfully patched {blocks_path} (Native BF16 LayerNorm, saves ~500MB VRAM)")
+    else:
+        print("ℹ️ Note: LayerNorm_FP32 already patched or modified.")
 
     with open(blocks_path, "w", encoding="utf-8") as f:
         f.write(content)
