@@ -931,11 +931,13 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video", target_gpu: str 
     if os.path.exists(vae_path):
         patch_vae_module(vae_path)
 
-    if target_gpu != "A100":
-        # Memory-saving patches only needed on memory-constrained 24GB GPUs (NVIDIA L4 / RTX 4090)
-        print("🔧 Applying 24GB GPU memory-saving patches (CPU offload, in-place SwiGLU, FP32 modulation)...")
-        if os.path.exists(quant_path):
-            patch_quantization_module(quant_path)
+    # Detect VRAM capacity (A100-40GB vs A100-80GB)
+    total_vram_gb = 80.0
+    if torch.cuda.is_available():
+        total_vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+
+    if total_vram_gb < 70 or target_gpu not in ["A100", "A100-80G"]:
+        print(f"🔧 GPU VRAM is {total_vram_gb:.1f}GB (<70GB): Applying CPU text_encoder offload and zero-allocation RoPE/LoRA patches...")
         if os.path.exists(pipe_path):
             patch_pipeline_module(pipe_path)
         if os.path.exists(dit_avatar_path):
@@ -944,8 +946,10 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video", target_gpu: str 
             patch_rope_module(rope_path)
         if os.path.exists(blocks_path):
             patch_blocks_module(blocks_path)
+        if os.path.exists(quant_path):
+            patch_quantization_module(quant_path)
     else:
-        print("🚀 Target GPU is A100 (80GB VRAM): skipping VAE CPU offload and aggressive quantization to preserve 100% full precision fidelity.")
+        print("🚀 Target GPU is A100-80GB (>70GB VRAM): skipping VAE CPU offload and aggressive quantization to preserve 100% full precision fidelity.")
 
 
 if __name__ == "__main__":
