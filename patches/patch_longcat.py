@@ -244,7 +244,22 @@ def patch_runner_script(runner_path: str):
         print("ℹ️ Note: vocal_separator already patched or modified in runner.")
 
     target_del = '        assert speech_array.size > 0, "No vocal detected"'
-    replace_del = '        assert speech_array.size > 0, "No vocal detected"\n        del vocal_separator\n        if torch.cuda.is_available():\n            torch.cuda.empty_cache()'
+    replace_del = '''        assert speech_array.size > 0, "No vocal detected"
+        # v2.1 Intro Silence Gating: zero out quiet background music before actual singing starts
+        try:
+            import numpy as np
+            intro_len = int(min(len(speech_array), 2.5 * 16000))
+            if intro_len > 0:
+                intro_rms = np.sqrt(np.mean(speech_array[:intro_len]**2))
+                overall_rms = np.sqrt(np.mean(speech_array**2))
+                if intro_rms < overall_rms * 0.4:
+                    speech_array[:intro_len] = 0.0
+                    print(f"✅ [v2.1 Patch] Intro silence gate applied to first {intro_len/16000:.1f}s (intro_rms={intro_rms:.4f} vs overall_rms={overall_rms:.4f})")
+        except Exception as e:
+            print(f"⚠️ [v2.1 Patch] Silence gate warning: {e}")
+        del vocal_separator
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()'''
 
     if target_del in content and "del vocal_separator" not in content:
         content = content.replace(target_del, replace_del)
