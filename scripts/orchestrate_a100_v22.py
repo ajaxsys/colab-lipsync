@@ -51,7 +51,7 @@ def ensure_session():
 
 def setup_remote():
     print("\n📦 Setting up remote A100 environment...")
-    setup_cmd = f"""colab ssh -s {SESSION} -- "
+    remote_setup_sh = r"""
 set -e
 export DEBIAN_FRONTEND=noninteractive
 
@@ -63,9 +63,9 @@ pip install -q av==19.0.2 diffusers==0.35.1 huggingface_hub==0.36.2 torchvision=
 
 echo '=== 2. FIX NCCL ==='
 pip install -q --force-reinstall nvidia-nccl-cu13 || true
-NCCL_SO=\\$(find /usr/local/lib/ -name 'libnccl.so.2*' 2>/dev/null | head -n 1)
-if [ -n \\\"\\$NCCL_SO\\\" ]; then
-    cp -P \\$(dirname \\\"\\$NCCL_SO\\\")/libnccl.so* /usr/lib/x86_64-linux-gnu/ 2>/dev/null || true
+NCCL_SO=$(find /usr/local/lib/ -name 'libnccl.so.2*' 2>/dev/null | head -n 1)
+if [ -n "$NCCL_SO" ]; then
+    cp -P $(dirname "$NCCL_SO")/libnccl.so* /usr/lib/x86_64-linux-gnu/ 2>/dev/null || true
     ldconfig
 fi
 
@@ -75,22 +75,23 @@ git clone -b feat/pipeline-upgrade-v2 https://github.com/ajaxsys/colab-lipsync.g
 git clone https://github.com/meituan-longcat/LongCat-Video.git /content/LongCat-Video
 
 echo '=== 4. VERIFY GPU ==='
-python3 -c '
-import torch
-print(f\\\"GPU: {torch.cuda.get_device_name(0)}, VRAM: {torch.cuda.get_device_properties(0).total_memory/1024**3:.1f}GB\\\")
-'
-" """
-    run(setup_cmd, capture=False)
+python3 -c "import torch; print('CUDA:', torch.cuda.is_available(), 'GPU:', torch.cuda.get_device_name(0), 'VRAM:', round(torch.cuda.get_device_properties(0).total_memory/1024**3, 1), 'GB')"
+echo '=== SETUP COMPLETED ==='
+"""
+    # Send script to remote
+    with open("/tmp/remote_setup.sh", "w") as f:
+        f.write(remote_setup_sh)
+    run(f"colab upload -s {SESSION} /tmp/remote_setup.sh /content/remote_setup.sh")
+    run(f"colab ssh -s {SESSION} -- 'bash /content/remote_setup.sh'", capture=False)
 
 def download_weights():
     print("\n📥 Downloading weights on A100...")
-    weight_script = f"""colab ssh -s {SESSION} -- "
-cat << 'EOF' > /content/download_a100_weights.py
+    weight_py = r"""
 import os, time
 from huggingface_hub import snapshot_download
 
 start = time.time()
-print('🚀 Downloading base components...')
+print('🚀 [1/2] Downloading base components...')
 snapshot_download(
     repo_id='meituan-longcat/LongCat-Video',
     local_dir='/content/LongCat-Video/weights/LongCat-Video',
@@ -98,7 +99,7 @@ snapshot_download(
     max_workers=8
 )
 
-print('🚀 Downloading Avatar 1.6 BF16 weights...')
+print('🚀 [2/2] Downloading Avatar 1.6 BF16 weights...')
 snapshot_download(
     repo_id='meituan-longcat/LongCat-Video-Avatar-1.6',
     local_dir='/content/LongCat-Video/weights/LongCat-Video-Avatar-1.6',
@@ -119,31 +120,36 @@ if os.path.exists(lora_b):
     if os.path.islink(lora_a) or os.path.exists(lora_a):
         os.remove(lora_a)
     os.symlink(lora_b, lora_a)
-    print('🔗 Linked loraB to loraA (for dynamic pure OPSD dispatch)')
+    print('🔗 Linked loraB to loraA (for pure OPSD dynamic LoRA dispatch)')
 
-print(f'🎉 Weights downloaded in {{time.time() - start:.1f}}s')
-EOF
-python3 /content/download_a100_weights.py
-" """
-    run(weight_script, capture=False)
+elapsed = round(time.time() - start, 1)
+print(f'🎉 Weights downloaded in {elapsed}s')
+"""
+    with open("/tmp/download_weights.py", "w") as f:
+        f.write(weight_py)
+    run(f"colab upload -s {SESSION} /tmp/download_weights.py /content/download_weights.py")
+    run(f"colab ssh -s {SESSION} -- 'python3 /content/download_weights.py'", capture=False)
 
 def start_inference():
     print("\n🎬 Launching full 30.48s (10 segments) inference...")
-    launch_cmd = f"""colab ssh -s {SESSION} -- "
+    launch_sh = r"""
 mkdir -p /content/output_longcat_30s_v22
-nohup python3 /content/colab-lipsync/run_longcat.py \\
-  --target_gpu=A100 \\
-  --resolution=480p \\
-  --num_segments=10 \\
-  --audio_guidance_scale=0.42 \\
-  --mix_steps=4 \\
-  --mix_alpha=0.0 \\
+nohup python3 /content/colab-lipsync/run_longcat.py \
+  --target_gpu=A100 \
+  --resolution=480p \
+  --num_segments=10 \
+  --audio_guidance_scale=0.42 \
+  --mix_steps=4 \
+  --mix_alpha=0.0 \
   --output_dir=/content/output_longcat_30s_v22 > /content/run_longcat_30s.log 2>&1 &
 sleep 5
 ps aux | grep -E 'run_longcat|torchrun' | grep -v grep
 echo '--- INFERENCE LAUNCHED ---'
-" """
-    run(launch_cmd, capture=False)
+"""
+    with open("/tmp/launch_inference.sh", "w") as f:
+        f.write(launch_sh)
+    run(f"colab upload -s {SESSION} /tmp/launch_inference.sh /content/launch_inference.sh")
+    run(f"colab ssh -s {SESSION} -- 'bash /content/launch_inference.sh'", capture=False)
 
 def monitor_and_download():
     print("\n👀 Monitoring inference until completion...")
