@@ -42,8 +42,9 @@ def main():
     parser.add_argument("--resolution", default="480p", choices=["480p", "720p"], help="Video resolution")
     parser.add_argument("--num_inference_steps", type=int, default=8, help="Distilled inference steps (default: 8)")
     parser.add_argument("--text_guidance_scale", type=float, default=1.0, help="Text guidance scale (default: 1.0 for distilled)")
-    parser.add_argument("--audio_guidance_scale", type=float, default=0.7, help="Audio guidance scale (tuned down from 1.0 to 0.7 to prevent over-articulation)")
-    parser.add_argument("--mix_alpha", type=float, default=0.65, help="Distill LoRA mixing alpha (tuned down from 1.0 to 0.65 to smooth mouth tearing)")
+    parser.add_argument("--audio_guidance_scale", type=float, default=0.42, help="Audio guidance scale (tuned down to 0.42 for gentle, natural lip movements)")
+    parser.add_argument("--mix_steps", type=int, default=0, help="Distill LoRA mixing steps (0 to bypass DMD and solely use smooth OPSD loraB)")
+    parser.add_argument("--mix_alpha", type=float, default=0.0, help="Distill LoRA mixing alpha (0.0 for pure OPSD)")
     parser.add_argument("--use_int8", action="store_true", help="Enable INT8 quantization (only needed on 24GB GPUs; disable on A100/H100)")
     parser.add_argument("--target_gpu", default="A100", choices=["A100", "L4", "4090"], help="Target GPU architecture (default: A100)")
     args = parser.parse_args()
@@ -64,7 +65,7 @@ def main():
 
     # 1. Create job json using drive_audio (pure vocal) for DiT lipsync conditioning
     job_data = {
-        "prompt": "A beautiful girl singing emotionally, ultra realistic, detailed facial expression, cinematic lighting, 8k masterpiece",
+        "prompt": "A beautiful girl singing gently and softly, elegant subtle mouth movements, lyrical expression, ultra realistic skin and hair, cinematic stage lighting, 8k masterpiece",
         "cond_image": image_path,
         "cond_audio": {
             "person1": drive_audio
@@ -95,7 +96,7 @@ def main():
         "--model_type=avatar-v1.6",
         "--use_distill",
         "--lora_path=loraB/lora.safetensors",
-        "--mix_steps=4",
+        f"--mix_steps={args.mix_steps}",
         f"--mix_alpha={args.mix_alpha}",
         f"--resolution={args.resolution}",
         f"--num_segments={args.num_segments}",

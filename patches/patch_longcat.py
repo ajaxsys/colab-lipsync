@@ -270,8 +270,17 @@ def patch_runner_script(runner_path: str):
                 if intro_rms < overall_rms * 0.4:
                     speech_array[:intro_len] = 0.0
                     print(f"✅ [v2.1 Patch] Intro silence gate applied to first {intro_len/16000:.1f}s (intro_rms={intro_rms:.4f} vs overall_rms={overall_rms:.4f})")
+            
+            # v2.2 Vocal Peak Compression / Dynamic Mouth Limiter:
+            # Prevents extreme sound pressure levels on open vowels (e.g., '态' /ai/) from over-driving DiT mouth latents
+            vocal_std = np.std(speech_array)
+            clip_threshold = 2.0 * vocal_std
+            if clip_threshold > 0:
+                excess = np.maximum(0, np.abs(speech_array) - clip_threshold)
+                speech_array = np.sign(speech_array) * (np.minimum(np.abs(speech_array), clip_threshold) + vocal_std * 0.4 * np.tanh(excess / (vocal_std * 0.4 + 1e-6)))
+                print(f"✅ [v2.2 Patch] Vocal peak soft-limiter applied (threshold={clip_threshold:.4f}, max_val={np.max(np.abs(speech_array)):.4f})")
         except Exception as e:
-            print(f"⚠️ [v2.1 Patch] Silence gate warning: {e}")
+            print(f"⚠️ [v2.2 Patch] Audio conditioning warning: {e}")
         del vocal_separator
         if torch.cuda.is_available():
             torch.cuda.empty_cache()'''
