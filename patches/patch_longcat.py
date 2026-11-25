@@ -452,6 +452,9 @@ def patch_runner_script(runner_path: str):
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    # Restore VAE back onto GPU for prepare_latents image encoding now that Whisper VRAM is freed
+    if hasattr(pipe, "vae") and pipe.vae is not None:
+        pipe.vae = pipe.vae.to(local_rank)
 
     if local_rank == 0:
         print(f"Generating segment 1/{num_segments}...")"""
