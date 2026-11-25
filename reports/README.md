@@ -12,7 +12,8 @@
 | **[v1.1_upgrade_report.md](v1.1_upgrade_report.md)** | **Wan2.1 (14B) + InfiniteTalk + BS-RoFormer + 60fps RIFE** | NVIDIA A100-40GB | **重大升级成片**：引入 2025 SOTA BS-RoFormer (SDR 12.97 dB)，彻底杜绝伴奏底噪误触发；补齐 60fps 运动补偿与片尾声画渐隐，整场仅耗 3.79 计算点。 |
 | **[v1.6_longcat_benchmark.md](v1.6_longcat_benchmark.md)** | **LongCat-Video-Avatar 1.6 (美团 13.6B BF16 + Whisper-v3 + 8步蒸馏 LoRA)** | **NVIDIA A100-80GB (全精度)** / L4-24GB (对比) | **巅峰对比版**：美团 13.6B 原生 BF16 全精度底座 + Whisper-Large-v3。彻底根除 L4 上的 Confetti 彩噪与纯黑，全片 17 分钟产出 30.48 秒成片。 |
 | **[v2.1_longcat_upgrade_report.md](v2.1_longcat_upgrade_report.md)** | **LongCat-Video-Avatar v2.1 (双轨静音门控 + 唇动张力收敛 + 双 LoRA 融合)** | **NVIDIA A100-40GB (BF16 全精度)** | **旗舰交付成片**：前奏能量静音门控（第0秒彻底闭唇）、`guidance=0.7` + `mix_alpha=0.65`（解决过度撕口，达到抒情歌唱美感标杆）、融合算子化 `F.rms_norm`，全片 30.48s 完美收官。 |
-| **[v2.2_longcat_upgrade_report.md](v2.2_longcat_upgrade_report.md)** | **LongCat-Video-Avatar v2.2 (纯 OPSD 驱动 + Tanh 声学限幅 + 麦克风吞食彻底根治)** | **NVIDIA A100-40GB (BF16 全精度)** | **🔥 终极完美成片**：彻底屏蔽 DMD 粗暴下颌拉伸、注入非线性 Tanh 声学限幅器、`guidance=0.42`，5.4s“态”吞麦克风硬伤彻底根治，3.2s“你”完美对齐 v1.1 黄金微张标杆，全片 30.48s 762 帧终极交付。 |
+| **[v2.2_longcat_upgrade_report.md](v2.2_longcat_upgrade_report.md)** | **LongCat-Video-Avatar v2.2 (纯 OPSD 驱动 + Tanh 声学限幅 + 麦克风吞食彻底根治)** | **NVIDIA A100-40GB (BF16 全精度)** | **定向调优成片**：彻底屏蔽 DMD 粗暴下颌拉伸、注入非线性 Tanh 声学限幅器，5.4s“态”吞麦克风硬伤彻底根治，但仍遗留第 1 秒“碎碎念”与固定 2.5s 硬编码门控。 |
+| **[v2.3_longcat_upgrade_report.md](v2.3_longcat_upgrade_report.md)** | **LongCat-Video-Avatar v2.3 (零硬编码逐帧 VAD 后置门控 + 中性 Prompt + 真实 DiT 残差缩放 `0.55`)** | **NVIDIA A100-40GB (BF16 全精度)** | **🌟 通用化终版成片 (`seed 2026`)**：彻底移除固定秒数硬编码，4 连盲测抽卡第 1 秒碎碎念治愈率 100%、防吃麦 100%，新增超 30s 双分块 Whisper CPU 卸载，零 OOM 交付 30.50s 完整成片。 |
 
 ---
 
