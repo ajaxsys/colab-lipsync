@@ -224,6 +224,56 @@ def patch_pipeline_module(pipeline_module_path: str):
     if target_avc_prep in content and "del cond_videos" not in content:
         content = content.replace(target_avc_prep, replace_avc_prep)
 
+    # 8. Offload multi-chunk Whisper encoder hidden states accumulation to CPU to prevent OOM on >30s audio
+    target_whisper_cat = """        # ---- Whisper encoder：mel → hidden states ----
+        enc_chunks = []
+        for i in range(0, audio_features.shape[-1], ENC_CHUNK):
+            chunk_hs = self.audio_encoder.encoder(
+                audio_features[:, :, i: i + ENC_CHUNK].to(device),
+                output_hidden_states=True,
+            ).hidden_states                           # tuple: (n_layers+1,) x [1, T_enc, D]
+            enc_chunks.append(torch.stack(chunk_hs, dim=2))  # [1, T_enc, n_layers, D]
+        audio_prompts = torch.cat(enc_chunks, dim=1)         # [1, T_enc_total, n_layers, D]
+        audio_prompts = audio_prompts[:, :video_length * 2]  # 截取有效帧
+
+        # ---- 按层分组 + 插值到目标帧数 ----
+        feat0 = linear_interpolation_fps(audio_prompts[:, :,  0: 8].mean(dim=2), ENC_FPS, fps, video_length)
+        feat1 = linear_interpolation_fps(audio_prompts[:, :,  8:16].mean(dim=2), ENC_FPS, fps, video_length)
+        feat2 = linear_interpolation_fps(audio_prompts[:, :, 16:24].mean(dim=2), ENC_FPS, fps, video_length)
+        feat3 = linear_interpolation_fps(audio_prompts[:, :, 24:32].mean(dim=2), ENC_FPS, fps, video_length)
+        feat4 = linear_interpolation_fps(audio_prompts[:, :, 32],                ENC_FPS, fps, video_length)
+        audio_emb = torch.stack([feat0, feat1, feat2, feat3, feat4], dim=2)[0]   # [T, 5, D]
+        return audio_emb"""
+
+    replace_whisper_cat = """        # ---- Whisper encoder：mel → hidden states (accumulate chunks on CPU to avoid multi-chunk VRAM OOM) ----
+        enc_chunks = []
+        for i in range(0, audio_features.shape[-1], ENC_CHUNK):
+            chunk_hs = self.audio_encoder.encoder(
+                audio_features[:, :, i: i + ENC_CHUNK].to(device),
+                output_hidden_states=True,
+            ).hidden_states
+            enc_chunks.append(torch.stack(chunk_hs, dim=2).float().cpu())
+            del chunk_hs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        audio_prompts = torch.cat(enc_chunks, dim=1)
+        del enc_chunks
+        audio_prompts = audio_prompts[:, :video_length * 2]
+
+        # ---- 按层分组 + 插值到目标帧数 (CPU FP32 interpolation -> move compact [T,5,D] back to device) ----
+        feat0 = linear_interpolation_fps(audio_prompts[:, :,  0: 8].mean(dim=2), ENC_FPS, fps, video_length)
+        feat1 = linear_interpolation_fps(audio_prompts[:, :,  8:16].mean(dim=2), ENC_FPS, fps, video_length)
+        feat2 = linear_interpolation_fps(audio_prompts[:, :, 16:24].mean(dim=2), ENC_FPS, fps, video_length)
+        feat3 = linear_interpolation_fps(audio_prompts[:, :, 24:32].mean(dim=2), ENC_FPS, fps, video_length)
+        feat4 = linear_interpolation_fps(audio_prompts[:, :, 32],                ENC_FPS, fps, video_length)
+        audio_emb = torch.stack([feat0, feat1, feat2, feat3, feat4], dim=2)[0].to(device=device, dtype=self.audio_encoder.dtype)
+        return audio_emb"""
+
+    if target_whisper_cat in content:
+        content = content.replace(target_whisper_cat, replace_whisper_cat)
+    else:
+        print("ℹ️ Note: get_audio_embedding_whisper CPU chunking already patched or modified.")
+
     with open(pipeline_module_path, "w", encoding="utf-8") as f:
         f.write(content)
     print(f"✅ Successfully patched {pipeline_module_path} (CPU Text Encoder Offload & VAE Lifecycle)")
@@ -334,6 +384,19 @@ def patch_runner_script(runner_path: str):
 
     if target_del in content and "del vocal_separator" not in content:
         content = content.replace(target_del, replace_del)
+
+    # Temporarily offload VAE to CPU during multi-chunk Whisper audio embedding to save ~800MB VRAM
+    target_get_audio = "        # audio embedding\n        full_audio_emb = pipe.get_audio_embedding("
+    replace_get_audio = """        # Offload VAE temporarily during Whisper encoding to guarantee safe VRAM headroom on 40GB GPUs
+        if hasattr(pipe, "vae") and pipe.vae is not None:
+            pipe.vae = pipe.vae.to("cpu")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # audio embedding
+        full_audio_emb = pipe.get_audio_embedding("""
+    if target_get_audio in content and "Offload VAE temporarily during Whisper" not in content:
+        content = content.replace(target_get_audio, replace_get_audio)
 
     # Apply post-Whisper VAD null-audio gating directly on full_audio_emb (replaces Whisper boundary transients with trained 0.0)
     target_nan_check = '        if torch.isnan(full_audio_emb).any():\n            raise ValueError(f"broken audio embedding with nan values")'
