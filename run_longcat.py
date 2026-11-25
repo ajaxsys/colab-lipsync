@@ -42,9 +42,10 @@ def main():
     parser.add_argument("--resolution", default="480p", choices=["480p", "720p"], help="Video resolution")
     parser.add_argument("--num_inference_steps", type=int, default=8, help="Distilled inference steps (default: 8)")
     parser.add_argument("--text_guidance_scale", type=float, default=1.0, help="Text guidance scale (default: 1.0 for distilled)")
-    parser.add_argument("--audio_guidance_scale", type=float, default=0.42, help="Audio guidance scale (tuned down to 0.42 for gentle, natural lip movements)")
+    parser.add_argument("--audio_guidance_scale", type=float, default=0.55, help="Audio drive / residual scale (applied directly in DiT audio cross-attn under distill mode)")
     parser.add_argument("--mix_steps", type=int, default=4, help="Distill LoRA mixing steps (4 with mix_alpha=0.0 bypasses DMD and solely uses smooth OPSD loraB)")
     parser.add_argument("--mix_alpha", type=float, default=0.0, help="Distill LoRA mixing alpha (0.0 for pure OPSD)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for diffusion sampling")
     parser.add_argument("--use_int8", action="store_true", help="Enable INT8 quantization (only needed on 24GB GPUs; disable on A100/H100)")
     parser.add_argument("--target_gpu", default="A100", choices=["A100", "L4", "4090"], help="Target GPU architecture (default: A100)")
     args = parser.parse_args()
@@ -64,8 +65,9 @@ def main():
     job_json_path = "/content/job_longcat.json"
 
     # 1. Create job json using drive_audio (pure vocal) for DiT lipsync conditioning
+    # Neutral prompt without mouth-movement/singing induction so silence stays still naturally
     job_data = {
-        "prompt": "A beautiful girl singing gently and softly, elegant subtle mouth movements, lyrical expression, ultra realistic skin and hair, cinematic stage lighting, 8k masterpiece",
+        "prompt": "A portrait video of a person holding a microphone on stage, calm natural expression, relaxed posture, ultra realistic skin and hair, cinematic stage lighting, 8k masterpiece",
         "cond_image": image_path,
         "cond_audio": {
             "person1": drive_audio
@@ -87,6 +89,7 @@ def main():
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
         "PYTHONUNBUFFERED": "1",
         "TORCH_DISTRIBUTED_DEBUG": "DETAIL",
+        "LONGCAT_SEED": str(args.seed),
     }
 
     cmd = [

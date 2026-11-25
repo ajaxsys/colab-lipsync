@@ -258,35 +258,98 @@ def patch_runner_script(runner_path: str):
     else:
         print("ℹ️ Note: vocal_separator already patched or modified in runner.")
 
+    # Support global seed override via LONGCAT_SEED env var for multi-seed reproducibility testing
+    content = content.replace(
+        "    global_seed = 42",
+        '    global_seed = int(os.environ.get("LONGCAT_SEED", "42"))',
+    )
+
+    # Preserve --audio_guidance_scale as audio_residual_scale when use_distill overrides CFG to 1.0
+    target_distill_cfg = """    if use_distill and model_type == "avatar-v1.5":
+        num_inference_steps = 8
+        text_guidance_scale = 1.0
+        audio_guidance_scale = 1.0"""
+    replace_distill_cfg = """    audio_residual_scale = 1.0
+    if use_distill and model_type == "avatar-v1.5":
+        num_inference_steps = 8
+        text_guidance_scale = 1.0
+        audio_residual_scale = float(args.audio_guidance_scale)
+        audio_guidance_scale = 1.0"""
+    if target_distill_cfg in content:
+        content = content.replace(target_distill_cfg, replace_distill_cfg)
+
     target_del = '        assert speech_array.size > 0, "No vocal detected"'
     replace_del = '''        assert speech_array.size > 0, "No vocal detected"
-        # v2.1 Intro Silence Gating: zero out quiet background music before actual singing starts
+        vad_weights = None
         try:
             import numpy as np
-            intro_len = int(min(len(speech_array), 2.5 * 16000))
-            if intro_len > 0:
-                intro_rms = np.sqrt(np.mean(speech_array[:intro_len]**2))
-                overall_rms = np.sqrt(np.mean(speech_array**2))
-                if intro_rms < overall_rms * 0.4:
-                    speech_array[:intro_len] = 0.0
-                    print(f"✅ [v2.1 Patch] Intro silence gate applied to first {intro_len/16000:.1f}s (intro_rms={intro_rms:.4f} vs overall_rms={overall_rms:.4f})")
-            
-            # v2.2 Vocal Peak Compression / Dynamic Mouth Limiter:
-            # Prevents extreme sound pressure levels on open vowels (e.g., '态' /ai/) from over-driving DiT mouth latents
-            vocal_std = np.std(speech_array)
+            # v2.3 Universal Frame-Level VAD (Voice Activity Detection, zero hardcoded timestamps):
+            # Measures local vocal RMS per 25fps frame across the entire track (intro, mid-pauses, outro).
+            frame_rate = save_fps * audio_stride
+            num_vad_frames = max(1, int(len(speech_array) / sr * frame_rate))
+            win_half = int(0.10 * sr)
+            frame_rms = np.zeros(num_vad_frames, dtype=np.float32)
+            for fi in range(num_vad_frames):
+                center = int((fi + 0.5) * sr / frame_rate)
+                s0 = max(0, center - win_half)
+                s1 = min(len(speech_array), center + win_half)
+                if s1 > s0:
+                    frame_rms[fi] = float(np.sqrt(np.mean(speech_array[s0:s1] ** 2)))
+            active_ref = float(np.percentile(frame_rms, 90)) if frame_rms.size > 0 else 0.0
+            vad_thresh = max(0.0025, 0.08 * active_ref)
+            vad_mask = (frame_rms > vad_thresh).astype(np.float32)
+            # Bridge brief pauses (<0.36s) so breaths/consonants are never clipped
+            gap_bridge = max(1, int(0.36 * frame_rate))
+            padded = vad_mask.copy()
+            last_on = -999
+            for fi in range(num_vad_frames):
+                if vad_mask[fi] > 0.5:
+                    if 0 < fi - last_on <= gap_bridge:
+                        padded[last_on:fi] = 1.0
+                    last_on = fi
+            k = max(3, int(0.24 * frame_rate) | 1)
+            vad_weights = np.clip(np.convolve(padded, np.ones(k, dtype=np.float32) / k, mode="same") * 1.5, 0.0, 1.0)
+
+            # Universal Vocal Peak Compression measured strictly on active speech samples
+            active_sample_mask = np.interp(
+                np.linspace(0, num_vad_frames - 1, len(speech_array)),
+                np.arange(num_vad_frames),
+                padded,
+            ) > 0.5
+            active_samples = speech_array[active_sample_mask]
+            vocal_std = float(np.std(active_samples)) if active_samples.size > 160 else float(np.std(speech_array))
             clip_threshold = 2.0 * vocal_std
             if clip_threshold > 0:
                 excess = np.maximum(0, np.abs(speech_array) - clip_threshold)
-                speech_array = np.sign(speech_array) * (np.minimum(np.abs(speech_array), clip_threshold) + vocal_std * 0.4 * np.tanh(excess / (vocal_std * 0.4 + 1e-6)))
-                print(f"✅ [v2.2 Patch] Vocal peak soft-limiter applied (threshold={clip_threshold:.4f}, max_val={np.max(np.abs(speech_array)):.4f})")
+                speech_array = np.sign(speech_array) * (
+                    np.minimum(np.abs(speech_array), clip_threshold)
+                    + vocal_std * 0.4 * np.tanh(excess / (vocal_std * 0.4 + 1e-6))
+                )
+            print(f"✅ [v2.3 Universal VAD] active_ref={active_ref:.4f}, vad_thresh={vad_thresh:.4f}, active_ratio={vad_weights.mean():.1%}, soft_limiter_thresh={clip_threshold:.4f}")
         except Exception as e:
-            print(f"⚠️ [v2.2 Patch] Audio conditioning warning: {e}")
+            print(f"⚠️ [v2.3 Patch] Audio conditioning warning: {e}")
         del vocal_separator
         if torch.cuda.is_available():
             torch.cuda.empty_cache()'''
 
     if target_del in content and "del vocal_separator" not in content:
         content = content.replace(target_del, replace_del)
+
+    # Apply post-Whisper VAD null-audio gating directly on full_audio_emb (replaces Whisper boundary transients with trained 0.0)
+    target_nan_check = '        if torch.isnan(full_audio_emb).any():\n            raise ValueError(f"broken audio embedding with nan values")'
+    replace_nan_check = '''        if torch.isnan(full_audio_emb).any():
+            raise ValueError(f"broken audio embedding with nan values")
+        if vad_weights is not None:
+            emb_len = full_audio_emb.shape[0]
+            w_np = vad_weights[:emb_len]
+            if len(w_np) < emb_len:
+                w_np = np.pad(w_np, (0, emb_len - len(w_np)), mode="constant", constant_values=0.0)
+            w_t = torch.from_numpy(w_np).to(device=full_audio_emb.device, dtype=full_audio_emb.dtype).view(-1, 1, 1)
+            full_audio_emb = full_audio_emb * w_t
+            if local_rank == 0:
+                print(f"✅ [v2.3 Post-Whisper Gate] Zeroed {(w_np < 0.05).sum()}/{emb_len} silent embedding frames to trained null-audio (0.0)")'''
+    if target_nan_check in content and "Post-Whisper Gate" not in content:
+        content = content.replace(target_nan_check, replace_nan_check)
 
     # Support avatar-v1.6 model_type in model loading
     content = content.replace('elif model_type == "avatar-v1.5":', 'elif model_type in ("avatar-v1.5", "avatar-v1.6"):')
@@ -295,15 +358,20 @@ def patch_runner_script(runner_path: str):
     # Enable offload_kv_cache=True to keep KV cache on CPU RAM, saving ~3GB GPU VRAM during AVC continuation
     content = content.replace("offload_kv_cache=False,", "offload_kv_cache=True,")
 
-    # Enable VAE tiling and slicing to cut VAE decode memory from 5.5GB to <700MB, preventing VAE OOM
+    # Enable VAE tiling and slicing + set distilled audio_residual_scale on all DiT blocks
     target_pipe_init = "    pipe.to(local_rank)"
     replace_pipe_init = """    pipe.to(local_rank)
+    if hasattr(pipe, "dit") and hasattr(pipe.dit, "blocks"):
+        for _blk in pipe.dit.blocks:
+            _blk.audio_residual_scale = audio_residual_scale
+        if local_rank == 0:
+            print(f"✅ [v2.3 Patch] Set DiT audio_residual_scale={audio_residual_scale} across {len(pipe.dit.blocks)} blocks")
     if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
         pipe.vae.enable_tiling()
         pipe.vae.enable_slicing()
         pipe.vae.enable_decoder_fused_padding()"""
 
-    if target_pipe_init in content and "enable_tiling" not in content:
+    if target_pipe_init in content and "audio_residual_scale = audio_residual_scale" not in content:
         content = content.replace(target_pipe_init, replace_pipe_init)
 
     # Reclaim Whisper VRAM before diffusion
@@ -987,6 +1055,34 @@ def patch_blocks_module(blocks_path: str):
         f.write(content)
 
 
+def patch_dit_audio_residual(dit_module_path: str):
+    """
+    Patches LongCatAvatarSingleStreamBlock.forward so audio_add_x is scaled by
+    self.audio_residual_scale (when != 1.0), enabling gentle audio-drive control
+    in single-pass distilled mode (--use_distill).
+    """
+    if not os.path.exists(dit_module_path):
+        raise FileNotFoundError(f"File not found: {dit_module_path}")
+
+    with open(dit_module_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    target_add = "            x = x + audio_add_x\n            x = x.to(x_dtype)"
+    replace_add = """            _a_scale = getattr(self, "audio_residual_scale", 1.0)
+            x = x + (audio_add_x * _a_scale if _a_scale != 1.0 else audio_add_x)
+            x = x.to(x_dtype)"""
+
+    if target_add in content:
+        content = content.replace(target_add, replace_add)
+        with open(dit_module_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"✅ Successfully patched {dit_module_path} (v2.3 Distilled Audio Residual Scaling)")
+    elif "audio_residual_scale" in content:
+        print(f"ℹ️ Note: {dit_module_path} already patched for audio_residual_scale.")
+    else:
+        print(f"⚠️ Note: Could not find audio_add_x marker in {dit_module_path}.")
+
+
 def apply_all_patches(repo_dir: str = "/content/LongCat-Video", target_gpu: str = "A100"):
     quant_path = os.path.join(repo_dir, "longcat_video", "modules", "quantization.py")
     pipe_path = os.path.join(repo_dir, "longcat_video", "pipeline_longcat_video_avatar.py")
@@ -998,7 +1094,7 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video", target_gpu: str 
     blocks_path = os.path.join(repo_dir, "longcat_video", "modules", "blocks.py")
     vae_path = os.path.join(repo_dir, "longcat_video", "modules", "autoencoder_kl_wan.py")
 
-    # Essential SDPA compatibility & checkpointing for all GPUs
+    # Essential SDPA compatibility, checkpointing & universal audio control for all GPUs
     if os.path.exists(attn_path):
         patch_attention_module(attn_path)
     if os.path.exists(base_attn_path):
@@ -1007,6 +1103,8 @@ def apply_all_patches(repo_dir: str = "/content/LongCat-Video", target_gpu: str 
         patch_runner_script(runner_path)
     if os.path.exists(vae_path):
         patch_vae_module(vae_path)
+    if os.path.exists(dit_avatar_path):
+        patch_dit_audio_residual(dit_avatar_path)
 
     # Detect VRAM capacity (A100-40GB vs A100-80GB)
     total_vram_gb = 80.0
